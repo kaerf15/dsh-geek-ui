@@ -1,0 +1,39 @@
+{
+  "name": "dsh-geek-sidebar",
+  "version": "1.19.4",
+  "private": true,
+  "license": "MIT",
+  "description": "DSH Web 极客侧栏：工作台侧栏与文件预览、技能管理弹窗、@文件提及桥。",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "parts",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "verifiedWith": "0.1.0-rc.8",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}
