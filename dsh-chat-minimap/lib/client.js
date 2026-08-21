@@ -744,6 +744,14 @@ body[data-ds-dark-theme] .dshm-root {
         if (!scrollEl) return;
         const turn = turnsRef.current[nodeIndex];
         const a = turn && turn.assistants[assistantIndex];
+        // Streaming partial has no DOM anchor: clicking it means "back to the
+        // answer being generated" — jump to the bottom instead of the pending
+        // walk (which scrolls to top repeatedly and yanks the user away).
+        if (a && a.key === '__partial__') {
+          lockActiveNode(nodeIndex);
+          scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+          return;
+        }
         const el = a ? findNodeElement(scrollEl, a.key) : null;
         if (!el) {
           if (!a) return;
@@ -762,6 +770,12 @@ body[data-ds-dark-theme] .dshm-root {
         if (!scrollEl) return;
         const turn = turnsRef.current[nodeIndex];
         const a = turn && turn.assistants[assistantIndex];
+        // Streaming partial: no DOM anchor (see scrollToAssistant) — bottom.
+        if (a && a.key === '__partial__') {
+          lockActiveNode(nodeIndex);
+          scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+          return;
+        }
         const aEl = a ? findNodeElement(scrollEl, a.key) : null;
         if (!aEl) {
           if (!a) return;
@@ -1019,7 +1033,11 @@ body[data-ds-dark-theme] .dshm-root {
         );
       };
       if (typeof slots.inject === 'function') {
-        ctx.slots.inject('shell.overlay', () => { doRegister(); });
+        // Must RETURN the register disposer: with braces the inject callback
+        // yields undefined, the old entry is never rolled back on declaration
+        // collapse/reload, and re-registering the same id throws "duplicate
+        // id" in SlotCore (permanent retire + uncaught).
+        ctx.slots.inject('shell.overlay', () => doRegister());
       } else {
         doRegister();
       }

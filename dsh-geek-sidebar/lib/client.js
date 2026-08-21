@@ -1271,8 +1271,11 @@ function MinimizeIcon(t) {
 function StopIcon(t) {
   return iconSvg([elIcon("rect", { x: 6, y: 6, width: 12, height: 12, rx: 2, fill: "currentColor", stroke: "none" })], t);
 }
+/* 对勾闪现：置位 1.2s 后自动复位（评审修复：原先只置位不复位，刷新/下载对勾永久残留；
+ * 两处调用方 03-tree.js/09-sidebar.js 均传布尔 setter，宿主组件常驻，超时后 setState 安全） */
 function flashDone(t) {
   t(!0);
+  setTimeout(() => t(!1), 1200);
 }
 const flashEl = (t) =>
   React.createElement("span", { className: "pw-flash-check" }, CheckIcon(t));
@@ -3520,10 +3523,14 @@ function AgentTabView({ client }) {
   const [copiedKey, setCopiedKey] = React.useState(null); /* 消息操作条「已复制」反馈（按 item.key） */
   const scrollRef = React.useRef(null);
   const fileRef = React.useRef(null);
+  /* 自动滚动信号 = 条数 + 末条文本长度：流式 chunk 并入末条（appendText 合并）时
+   * items.length 不变，只盯条数会长回复流式期间不滚动（评审修复） */
+  const lastIt = client.items[client.items.length - 1];
+  const scrollSig = client.items.length + ":" + (lastIt && lastIt.text ? lastIt.text.length : 0);
   React.useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [client.items.length]);
+  }, [scrollSig]);
   /* usage/历史两浮层的外点与 Esc 收回：pointerdown 早于按钮 click，命中自身
    * 控件（closest 命中）时忽略——开关按钮自身的切换逻辑不受影响；点控制行
    * 其他按钮（新对话/分叉/下拉）同样收回浮层。 */

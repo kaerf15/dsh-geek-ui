@@ -249,8 +249,11 @@ function MinimizeIcon(t) {
 function StopIcon(t) {
   return iconSvg([elIcon("rect", { x: 6, y: 6, width: 12, height: 12, rx: 2, fill: "currentColor", stroke: "none" })], t);
 }
+/* 对勾闪现：置位 1.2s 后自动复位（评审修复：原先只置位不复位，刷新/下载对勾永久残留；
+ * 两处调用方 03-tree.js/09-sidebar.js 均传布尔 setter，宿主组件常驻，超时后 setState 安全） */
 function flashDone(t) {
   t(!0);
+  setTimeout(() => t(!1), 1200);
 }
 const flashEl = (t) =>
   React.createElement("span", { className: "pw-flash-check" }, CheckIcon(t));

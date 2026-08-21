@@ -38,7 +38,9 @@ async function parseJson(req) {
 }
 
 export function mountApi(ctx, prefix, routes) {
-  ctx.webServer.register({
+  /* register 返回的 disposer 必须挂 Fiber（评审修复：原先丢弃——Fiber 卸载后路由泄漏，
+   * 插件重载时 duplicate 报错直接 apply 失败；宿主 dsh-host-webserver 由调用方负责回收） */
+  ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: prefix,
     handler: async (req, res) => {
@@ -57,5 +59,5 @@ export function mountApi(ctx, prefix, routes) {
         send(res, status, { error: String(err && err.message ? err.message : err) })
       }
     },
-  })
+  }))
 }

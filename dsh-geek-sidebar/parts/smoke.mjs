@@ -296,7 +296,8 @@ try {
       ok('ui AgentTabView 渲染（模式/模型选择器）', findAll(view, (n) => n.type === 'select').length === 2)
       /* 布局重构（用户决策 2026-08）：头部控制条移除；三件套进输入区，选择器进下沿控制行 */
       ok('ui 无头部控制条（pw-acp-head 不存在）', findAll(view, (n) => String(n.props && n.props.className) === 'pw-acp-head').length === 0)
-      ok('ui 输入区会话操作按钮（新对话/历史/分叉）', findAll(view, (n) => typeof n.props.className === 'string' && n.props.className.indexOf('pw-acp-hbtn') === 0).length === 3 && findAll(view, (n) => n.children && n.children[0] === '新对话').length === 1)
+      /* 1.19.0 起输入区会话操作按钮为四件：新对话/历史/分叉/压缩（原先断言 3 件是压缩按钮漏更的漂移） */
+      ok('ui 输入区会话操作按钮（新对话/历史/分叉/压缩）', findAll(view, (n) => typeof n.props.className === 'string' && n.props.className.indexOf('pw-acp-hbtn') === 0).length === 4 && findAll(view, (n) => n.children && n.children[0] === '新对话').length === 1 && findAll(view, (n) => String(n.props && n.props.className).indexOf('pw-acp-compact') >= 0).length === 1)
       ok('ui 输入框独立成框 + 控制行分离', findAll(view, (n) => String(n.props && n.props.className) === 'pw-acp-composer').length === 1 && findAll(view, (n) => String(n.props && n.props.className) === 'pw-acp-controls').length === 1)
       /* 上下文紧凑指示器：usage_update 落库 → 控制行渲染 迷你条+百分比 */
       wsLog[0].onmessage({ data: JSON.stringify({ type: 'update', update: { sessionUpdate: 'usage_update', used: 131072, size: 262144 } }) })
