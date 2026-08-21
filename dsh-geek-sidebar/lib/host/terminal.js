@@ -8,6 +8,7 @@ import { chmodSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { userInfo, homedir } from 'node:os'
+import { checkOrigin } from './http.js'
 
 /* node-pty / ws 的解析链：dsh CLI 入口 → web profile 的 hoisted node_modules →
  * dsh 安装目录 → 插件自身。插件零依赖声明，运行时从宿主环境解析。 */
@@ -152,6 +153,8 @@ export function mountTerminal(ctx, mgr) {
   return ctx.webServer.registerUpgrade({
     path: '/__dsh-geek-sidebar__/wb/terminal-ws',
     handler: (req, socket, head) => {
+      /* 同源护栏（评审修复：WS 是 PTY 直通，跨站页面一条连接即登录 shell） */
+      if (!checkOrigin(req)) { socket.destroy(); return }
       wss.handleUpgrade(req, socket, head, (ws) => {
         try {
           const url = new URL(req.url || '/', 'http://localhost')

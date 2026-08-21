@@ -160,13 +160,22 @@ try {
   const sp = await routes['GET /skills/prefs']({ query: new URLSearchParams() })
   ok('skills/prefs 只读', sp && typeof sp.defaultGlobalDir === 'string')
 
-  const skillMd = join(skillDir, 'SKILL.md')
+  /* toggle 白名单（1.19.6 起）：只接受扫描根下的 <name>/SKILL.md。
+   * 正向夹具放 <tmp>/.agents/skills/ 下模拟项目根；根外文件必须 403 */
+  const skillRoot = join(dir, '.agents', 'skills', 'skill-fix')
+  mkdirSync(skillRoot, { recursive: true })
+  const skillMd = join(skillRoot, 'SKILL.md')
   writeFileSync(skillMd, '---\nname: smoke-fix\ndescription: t\n---\nbody\n', 'utf8')
   const t1 = await routes['POST /skills/toggle']({ body: { filePath: skillMd, disable: true } })
   const off = readFileSync(skillMd, 'utf8').includes('disable-model-invocation: true')
   const t2 = await routes['POST /skills/toggle']({ body: { filePath: skillMd, disable: false } })
   const on = !readFileSync(skillMd, 'utf8').includes('disable-model-invocation')
-  ok('skills/toggle 往返', t1.success && off && t2.success && on)
+  ok('skills/toggle 往返（白名单内）', t1.success && off && t2.success && on)
+  const outsideMd = join(skillDir, 'SKILL.md')
+  writeFileSync(outsideMd, '---\nname: x\n---\n', 'utf8')
+  let denied = false
+  try { await routes['POST /skills/toggle']({ body: { filePath: outsideMd, disable: true } }) } catch (e) { denied = e && e.status === 403 }
+  ok('skills/toggle 白名单外拒绝（403）', denied && !readFileSync(outsideMd, 'utf8').includes('disable-model-invocation'))
 
   /* ---------- terminal pty 端到端：spawn → 写入标记 → transcript 命中 → 回收 ---------- */
   try {

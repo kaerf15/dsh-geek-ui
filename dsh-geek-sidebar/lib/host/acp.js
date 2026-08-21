@@ -28,6 +28,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { existsSync } from 'node:fs'
+import { checkOrigin } from './http.js'
 
 function makeRequire() {
   const candidates = []
@@ -214,6 +215,7 @@ class AcpManager {
     this.map = new Map()
     this.closes = new Map()
     this.sockets = new Map() /* key -> Set<ws>（广播事件给全部挂载者） */
+    this.starting = new Map() /* key -> 启动 promise（并发 attach 防双进程，评审修复） */
   }
   agentOf(id) {
     return AGENTS.find((a) => a.id === id) || null
@@ -234,6 +236,12 @@ class AcpManager {
     if (h && (h.exited || h.agent.id !== agentId)) {
       this.close(key)
       h = undefined
+    }
+    /* 同 key 并发 attach 等同一个启动 promise（评审修复：原先 await start() 之后才
+     * map.set——双 attach 双 spawn，先完成者丢引用永久泄漏，配额也被绕过） */
+    if (!h && this.starting.has(key)) {
+      await this.starting.get(key)
+      h = this.map.get(key)
     }
     if (!h) {
       const agent = this.agentOf(agentId)
@@ -259,8 +267,18 @@ class AcpManager {
           options: (msg.params && msg.params.options) || [],
         })
       }
-      await h.start()
+      /* 先登记占位再启动：配额立即计数，并发 attach 走上面 starting 等待 */
       this.map.set(key, h)
+      const p = h.start().catch((err) => {
+        if (this.map.get(key) === h) this.map.delete(key)
+        throw err
+      })
+      this.starting.set(key, p)
+      try {
+        await p
+      } finally {
+        if (this.starting.get(key) === p) this.starting.delete(key)
+      }
     }
     if (!this.sockets.has(key)) this.sockets.set(key, new Set())
     this.sockets.get(key).add(ws)
@@ -323,6 +341,7 @@ class AcpManager {
   disposeAll() {
     for (const t of this.closes.values()) clearTimeout(t)
     this.closes.clear()
+    this.starting.clear()
     for (const k of [...this.map.keys()]) this.close(k)
   }
 }
@@ -338,6 +357,8 @@ export function mountAcp(ctx, mgr) {
   return ctx.webServer.registerUpgrade({
     path: '/__dsh-geek-sidebar__/wb/acp-ws',
     handler: (req, socket, head) => {
+      /* 同源护栏（评审修复：WS 是 agent 子进程直通，跨站页面可直发 prompt） */
+      if (!checkOrigin(req)) { socket.destroy(); return }
       wss.handleUpgrade(req, socket, head, (ws) => {
         const url = new URL(req.url || '/', 'http://localhost')
         const q = url.searchParams

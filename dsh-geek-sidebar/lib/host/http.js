@@ -25,10 +25,28 @@ function readBody(req) {
     let d = ''
     /* 上限必须 > 最大合法业务体：writeFile 允许 writeMaxMB(1MB) 文本 + JSON 包装余量，
      * 旧值 1e6 < 1MB 会把合规 writeFile 掐成连接错误（评审 P3） */
-    req.on('data', (c) => { d += c; if (d.length > 3 * 1024 * 1024) req.destroy() })
+    req.on('data', (c) => {
+      d += c
+      /* 超限必须 reject（评审修复：原先只 destroy，'end'/'error' 都不保证触发，
+       * promise 永不 settle，handler 悬挂占连接） */
+      if (d.length > 3 * 1024 * 1024) { rejectB(httpError(413, 'body too large')); req.destroy() }
+    })
     req.on('end', () => resolveB(d))
     req.on('error', rejectB)
   })
+}
+
+/* 同源护栏（评审修复：端点原先零校验，DNS rebinding/跨站表单可打本地写接口）。
+ * 浏览器跨站请求必带 Origin；Origin.host 与请求 Host 不一致 → 拒绝。
+ * 无 Origin（curl / 同机脚本）放行——部署假设仍是 loopback。 */
+export function checkOrigin(req) {
+  const origin = req.headers && req.headers.origin
+  if (!origin) return true
+  try {
+    return new URL(origin).host === String(req.headers.host || '')
+  } catch {
+    return false
+  }
 }
 
 async function parseJson(req) {
@@ -44,6 +62,7 @@ export function mountApi(ctx, prefix, routes) {
     kind: 'prefix',
     path: prefix,
     handler: async (req, res) => {
+      if (!checkOrigin(req)) return send(res, 403, { error: 'forbidden origin' })
       const url = new URL(req.url || '/', 'http://localhost')
       const sub = url.pathname.slice(prefix.length) || '/'
       const key = req.method + ' ' + sub

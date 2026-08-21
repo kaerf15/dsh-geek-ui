@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { httpError } from './http.js'
@@ -409,6 +409,13 @@ export function skillsApi() {
     'POST /skills/toggle': async ({ body }) => {
       const filePath = String(body.filePath || '')
       if (!filePath || !existsSync(filePath)) throw httpError(404, 'file not found')
+      /* 白名单（评审修复：原先任意已存在文件都能被写入 frontmatter——任意文件改写原语）。
+       * 只接受扫描根（prefs.globalDir 或任意 <cwd>/.agents/skills）下的 <name>/SKILL.md */
+      const skillDir = resolve(dirname(filePath))
+      const root = dirname(skillDir)
+      const inGlobal = root === resolve(readPrefs().globalDir)
+      const inProject = /(?:^|[\\/])\.agents[\\/]skills$/.test(root)
+      if (basename(filePath) !== 'SKILL.md' || (!inGlobal && !inProject)) throw httpError(403, 'not a togglable skill file')
       setDisabled(filePath, Boolean(body.disable))
       return { success: true }
     },

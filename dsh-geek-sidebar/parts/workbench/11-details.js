@@ -20,6 +20,12 @@ function ImgZoomView() {
   );
 }
 
+/* 异步回调落地前的活守卫（评审修复）：响应回来时用户可能已切文件/切会话，
+ * 比对发起时的 sid+path，不一致就丢弃——否则旧文件的响应写进新文件的视图态 */
+function detailsAlive(sid, path) {
+  return sessionProbe.sid === sid && store.bucket(sid).active === path;
+}
+
 function Details(t) {
   const e = React.createElement,
     s = t.layout,
@@ -88,9 +94,11 @@ function Details(t) {
     if (!c) return;
     const rf = () => {
       if (edRef.current || document.visibilityState !== "visible") return;
+      const sid0 = sessionProbe.sid, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
         .then((i2) => {
+          if (!detailsAlive(sid0, path0)) return;
           i2 &&
             m((S) =>
               S && S.kind === "text" && i2.kind === "text" && S.text === i2.text
@@ -113,14 +121,17 @@ function Details(t) {
         (p(""),
         b(!1),
         R(!0),
-        host
-          .call("workbench.download", { path: c.path })
-          .then((i) => {
-            (R(!1), i && i.ok ? b(!0) : p("✗ " + ((i && i.error) || "失败")));
-          })
-          .catch((i) => {
-            (R(!1), p("✗ " + String(i)));
-          }));
+        (() => {
+          const sid0 = sessionProbe.sid, path0 = c.path;
+          host
+            .call("workbench.download", { path: c.path })
+            .then((i) => {
+              (R(!1), detailsAlive(sid0, path0) && (i && i.ok ? b(!0) : p("✗ " + ((i && i.error) || "失败"))));
+            })
+            .catch((i) => {
+              (R(!1), detailsAlive(sid0, path0) && p("✗ " + String(i)));
+            });
+        })());
     },
     j = h === "auto" ? (c && isMd(c.name) ? "preview" : "source") : h,
     z = c ? c.path.split("/").filter(Boolean) : [],
@@ -332,15 +343,16 @@ function Details(t) {
                 className: "pw-icon-btn",
                 title: "重新加载文件内容",
                 onClick: () => {
-                  c &&
-                    host
-                      .call("workbench.readFile", { path: c.path })
-                      .then((i2) => {
-                        i2 && m(i2);
-                      })
-                      .catch((i2) => {
-                        m({ error: String(i2) });
-                      });
+                  if (!c) return;
+                  const sid0 = sessionProbe.sid, path0 = c.path;
+                  host
+                    .call("workbench.readFile", { path: c.path })
+                    .then((i2) => {
+                      detailsAlive(sid0, path0) && i2 && m(i2);
+                    })
+                    .catch((i2) => {
+                      detailsAlive(sid0, path0) && m({ error: String(i2) });
+                    });
                 },
               },
               RefreshIcon(13),
@@ -426,6 +438,7 @@ function Details(t) {
                 disabled: saving || draft === ((r && r.text) || ""),
                 onClick: () => {
                   if (saving) return;
+                  const sid0 = sessionProbe.sid, path0 = c.path;
                   (setSaving(!0),
                     host
                       .call("workbench.writeFile", {
@@ -434,12 +447,13 @@ function Details(t) {
                       })
                       .then((i2) => {
                         (setSaving(!1),
-                          i2 && i2.ok
-                            ? (m(OA({}, r, { text: draft })), setEd(!1))
-                            : p("✗ " + ((i2 && i2.error) || "保存失败")));
+                          detailsAlive(sid0, path0) &&
+                            (i2 && i2.ok
+                              ? (m(OA({}, r, { text: draft })), setEd(!1))
+                              : p("✗ " + ((i2 && i2.error) || "保存失败"))));
                       })
                       .catch((i2) => {
-                        (setSaving(!1), p("✗ " + String(i2)));
+                        (setSaving(!1), detailsAlive(sid0, path0) && p("✗ " + String(i2)));
                       }));
                 },
               },

@@ -359,6 +359,20 @@ body[data-ds-dark-theme] .dshm-root {
       return { headings: [], paragraph: firstParagraph };
     }
 
+    // Memo cache: markdown strings are immutable snapshot values, stable across
+    // renders — re-parsing every assistant on each rail mousemove dropped frames
+    // on long sessions (review fix). Bounded; overflow clears and rebuilds lazily.
+    const outlineCache = new Map();
+    const OUTLINE_CACHE_MAX = 200;
+    function extractOutlineCached(markdown) {
+      const hit = outlineCache.get(markdown);
+      if (hit) return hit;
+      const out = extractOutline(markdown);
+      if (outlineCache.size >= OUTLINE_CACHE_MAX) outlineCache.clear();
+      outlineCache.set(markdown, out);
+      return out;
+    }
+
     /* ------------------------------------------------------------------ */
     /* Layout (verbatim port)                                               */
     /* ------------------------------------------------------------------ */
@@ -961,7 +975,7 @@ body[data-ds-dark-theme] .dshm-root {
           },
             turns.map((turn, index) => {
               const isLocated = nearestNodeIndex === index;
-              const outlines = turn.assistants.map((a) => extractOutline(a.markdown));
+              const outlines = turn.assistants.map((a) => extractOutlineCached(a.markdown));
               return h('div', {
                 key: turn.key + ':' + index,
                 ref: (el) => {

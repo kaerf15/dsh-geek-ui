@@ -1,6 +1,6 @@
 {
   "name": "dsh-geek-sidebar",
-  "version": "1.19.5",
+  "version": "1.19.6",
   "private": true,
   "license": "MIT",
   "description": "DSH Web 极客侧栏：工作台侧栏与文件预览、技能管理弹窗、@文件提及桥。",

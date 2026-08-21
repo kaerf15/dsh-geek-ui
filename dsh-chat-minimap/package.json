@@ -1,6 +1,6 @@
 {
   "name": "dsh-chat-minimap",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "license": "MIT",
   "description": "DSH web plugin: pi-web style chat minimap — a right-edge turn rail with a hover outline preview for long conversations.",
