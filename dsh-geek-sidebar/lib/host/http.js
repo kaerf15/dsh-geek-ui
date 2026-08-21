@@ -52,7 +52,13 @@ export function checkOrigin(req) {
 async function parseJson(req) {
   const raw = await readBody(req)
   if (!raw.trim()) return {}
-  return JSON.parse(raw)
+  /* 评审修复：JSON 语法错误是客户端错误，报 400——原先一律 500，干扰前端排障 */
+  try {
+    return JSON.parse(raw)
+  } catch (e) {
+    if (e instanceof SyntaxError) throw httpError(400, 'invalid JSON body')
+    throw e
+  }
 }
 
 export function mountApi(ctx, prefix, routes) {

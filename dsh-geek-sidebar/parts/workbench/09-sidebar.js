@@ -45,9 +45,9 @@ function Sidebar(t) {
     fe = React.useState(""),
     de = fe[0],
     V = fe[1],
-    he = React.useState(null),
+    he = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id=worktree 路径） */
     Ae = he[0],
-    le = he[1],
+    le = (id) => (id == null ? he[2]() : he[1](id)),
     me = React.useState(explorerOpenPref),
     pe = me[0],
     Be = me[1],
@@ -113,7 +113,7 @@ function Sidebar(t) {
     },
     M = ee(p);
   (React.useEffect(() => {
-    currentRootPath = p;
+    setCurrentRootPath(p); /* 评审修复：原裸赋值 currentRootPath=p 无 bus 节拍，订阅方感知不到 */
   }, [p]),
     React.useEffect(() => {
       sessionProbe.set(k || null);
@@ -281,7 +281,7 @@ function Sidebar(t) {
       Me && i.trim()
         ? ne.filter(
             (n) =>
-              (n.branch || shortPath(n.path))
+              (n.branch || shortenPath(n.path))
                 .toLowerCase()
                 .indexOf(i.trim().toLowerCase()) >= 0,
           )
@@ -291,45 +291,27 @@ function Sidebar(t) {
     (We = e(
       "div",
       { className: "pw-drop" },
-      Ee
-        ? e(
-            "div",
-            { className: "pw-drop-filter" },
-            e("input", {
-              className: "pw-input",
-              value: j,
-              placeholder: "过滤项目…",
-              onChange: (n) => z(n.target.value),
-            }),
-          )
-        : null,
+      Ee ? dropFilterEl(j, "过滤项目…", z) : null,
       e(
         "div",
         { className: "pw-drop-list" },
         je.map((n) =>
-          e(
-            "button",
-            {
-              key: n.root,
-              className:
-                "pw-drop-row" +
-                (canonPath(n.root) === canonPath(M) ? " cur" : ""),
-              title: n.root,
-              onClick: () => $e(n.root),
-            },
-            e(
-              "span",
-              { className: "pw-check" },
-              canonPath(n.root) === canonPath(M) ? "✓" : "",
-            ),
-            e("span", { className: "pw-mono" }, shortPath(n.root)),
-            n.running > 0
-              ? e("span", { className: "pw-act run" }, "● " + n.running)
-              : null,
-            n.pending > 0
-              ? e("span", { className: "pw-act warn" }, "● " + n.pending)
-              : null,
-          ),
+          dropRowEl({
+            k: n.root,
+            cur: canonPath(n.root) === canonPath(M),
+            title: n.root,
+            onClick: () => $e(n.root),
+            label: shortenPath(n.root),
+            /* 活动徽标经 extra 注入（数组子节点补 key，原为静态子参数无需 key） */
+            extra: [
+              n.running > 0
+                ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
+                : null,
+              n.pending > 0
+                ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
+                : null,
+            ],
+          }),
         ),
         je.length === 0
           ? e("div", { className: "pw-hint" }, "没有匹配的项目")
@@ -369,23 +351,16 @@ function Sidebar(t) {
           : e(
               "div",
               { key: d.path, className: "pw-wt-row" },
-              e(
-                "button",
-                {
-                  className: "pw-drop-row" + (W ? " cur" : ""),
-                  title: d.path,
-                  onClick: () => Ge(d.path),
-                },
-                e("span", { className: "pw-check" }, W ? "✓" : ""),
-                e(
-                  "span",
-                  { className: "pw-mono" },
-                  d.branch || shortPath(d.path),
-                ),
-                d.isMain
+              dropRowEl({
+                k: d.path,
+                cur: W,
+                title: d.path,
+                onClick: () => Ge(d.path),
+                label: d.branch || shortenPath(d.path),
+                extra: d.isMain
                   ? e("span", { className: "pw-main-badge" }, "主分支")
                   : null,
-              ),
+              }),
               d.isMain
                 ? null
                 : e(
@@ -455,18 +430,7 @@ function Sidebar(t) {
     Oe = e(
       "div",
       { className: "pw-drop" },
-      Me
-        ? e(
-            "div",
-            { className: "pw-drop-filter" },
-            e("input", {
-              className: "pw-input",
-              value: i,
-              placeholder: "过滤 worktree…",
-              onChange: (d) => N(d.target.value),
-            }),
-          )
-        : null,
+      Me ? dropFilterEl(i, "过滤 worktree…", N) : null,
       e(
         "div",
         { className: "pw-drop-list sm" },
@@ -570,7 +534,7 @@ function Sidebar(t) {
           {
             className: "pw-new-btn",
             disabled: !p,
-            title: p ? "在 " + shortPath(p) + " 新建会话" : "先选择项目",
+            title: p ? "在 " + shortenPath(p) + " 新建会话" : "先选择项目",
             onClick: () => _e(p),
           },
           "＋ 新建",
@@ -612,7 +576,7 @@ function Sidebar(t) {
             "span",
             { className: "pw-mono" + (M ? " pw-tail" : " dim") },
             /* LRM 前缀：RTL 截断下保住 ~/ 等前导中性字符的显示顺序 */
-            M ? "\u200e" + shortPath(M) : "选择项目…",
+            M ? "\u200e" + shortenPath(M) : "选择项目…",
           ),
           aRun + aPend > 0
             ? e(
@@ -639,9 +603,7 @@ function Sidebar(t) {
               )
             : null,
         ),
-        E
-          ? e("div", { className: "pw-drop-overlay", onClick: () => D(!1) })
-          : null,
+        E ? dropOverlayEl(() => D(!1)) : null,
         We,
       ),
       J
@@ -665,7 +627,7 @@ function Sidebar(t) {
               e(
                 "span",
                 { className: "pw-mono" },
-                G ? G.branch || shortPath(G.path) : "…",
+                G ? G.branch || shortenPath(G.path) : "…",
               ),
               G && G.isMain
                 ? e("span", { className: "pw-main-badge" }, "主分支")
@@ -675,9 +637,7 @@ function Sidebar(t) {
                 : null,
               e("span", { className: "pw-chev" }, "▾"),
             ),
-            B
-              ? e("div", { className: "pw-drop-overlay", onClick: () => _(!1) })
-              : null,
+            B ? dropOverlayEl(() => _(!1)) : null,
             Oe,
           )
         : null,

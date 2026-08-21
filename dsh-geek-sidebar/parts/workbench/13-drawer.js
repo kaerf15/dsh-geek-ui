@@ -12,6 +12,11 @@ function PreviewDrawer(t) {
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   const st = usePreviewState(sessionProbe.sid);
   const [hiddenFor, setHiddenFor] = React.useState(null);
+  /* 评审修复：遮罩 dismiss 只压"这一次打开"——文件关掉（activeFile 空）即复位 hiddenFor，
+   * 重开同一文件抽屉能再出场（原版永不重置，同路径关闭再开也被永久压制，无挽回路径） */
+  React.useEffect(() => {
+    !st.activeFile && hiddenFor && setHiddenFor(null);
+  }, [st.activeFile, hiddenFor]);
   /* 宽屏下官方 details 栏是否可用：镜像 ui-layout AppFrame 的 detailsSession 门
    * ——有当前会话且 blank===false 才给列宽，否则钳 0（新建空白会话/无会话时
    * openDetails 只恢复宽度偏好，拗不过该钳制，预览被压进 0 宽列不可见）。
@@ -39,7 +44,8 @@ function PreviewDrawer(t) {
       "div",
       { className: "pw-drawer-wrap" },
       e(Details, {
-        sessionId: sessionProbe.sid,
+        /* 评审修复：删掉 sessionId 死 prop——Details 只读 sessionProbe.sid，从不消费该 prop。
+         *（16-apply 的 PanelHost 仍保留 sessionId：那是 dshDetailsPanels 三方驱动的服务面，非 Details 私有） */
         layout: t.layout,
         workspacesSvc: t.workspacesSvc,
         mentionBridge: t.mentionBridge,

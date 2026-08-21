@@ -196,12 +196,22 @@ function setDisabled(filePath, disable) {
 /* ---------- npx 安装 / 更新 ---------- */
 function runNpx(args, cwd) {
   return new Promise((resolveP) => {
-    /* Windows 下 npx 是 npx.cmd，需要 shell 解析 */
-    const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, { cwd: cwd || undefined, shell: process.platform === 'win32', env: { ...process.env, FORCE_COLOR: '0' } })
+    /* Windows 下 npx 是 npx.cmd，需要 shell 解析；POSIX 下 detached 使 npx 成为
+     * 进程组长（评审修复：供超时整组击杀，见下） */
+    const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, { cwd: cwd || undefined, shell: process.platform === 'win32', detached: process.platform !== 'win32', env: { ...process.env, FORCE_COLOR: '0' } })
     let out = ''
     child.stdout.on('data', (d) => { out += d })
     child.stderr.on('data', (d) => { out += d })
-    const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* gone */ } }, 90000)
+    /* 评审修复：超时杀整个进程组——原先只杀 npx 本体，它拉起的安装子进程会继续跑；
+     * 组已不在则退杀直接子进程；Windows 维持杀直接子进程 */
+    const timer = setTimeout(() => {
+      try {
+        if (process.platform === 'win32') child.kill('SIGKILL')
+        else process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        try { child.kill('SIGKILL') } catch { /* gone */ }
+      }
+    }, 90000)
     child.on('close', (code) => { clearTimeout(timer); resolveP({ code, output: out.replace(ANSI_RE, '') }) })
     child.on('error', (err) => { clearTimeout(timer); resolveP({ code: -1, output: String(err) }) })
   })

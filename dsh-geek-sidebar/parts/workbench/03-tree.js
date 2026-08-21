@@ -8,9 +8,9 @@ function TreeNode(t) {
     u = o.children[e.path],
     r = !!o.loading[e.path],
     m = t.activePath === e.path,
-    h2 = React.useState(!1),
-    g2 = h2[0],
-    C2 = h2[1],
+    h2 = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id 用常量 1） */
+    g2 = h2[0] === 1,
+    C2 = (v) => (v ? h2[1](1) : h2[2]()),
     doDel = () => {
       (C2(!1), t.onDelete && t.onDelete(e));
     },
@@ -299,12 +299,10 @@ function FileBrowser(t) {
             e(
               "span",
               { className: "pw-mono" + (l ? " pw-tail" : " dim") },
-              l ? "\u200e" + shortPath(l) : "选择笔记目录…",
+              l ? "\u200e" + shortenPath(l) : "选择笔记目录…",
             ),
           ),
-          E
-            ? e("div", { className: "pw-drop-overlay", onClick: () => D(!1) })
-            : null,
+          E ? dropOverlayEl(() => D(!1)) : null,
           E
             ? e(
                 "div",
@@ -313,18 +311,14 @@ function FileBrowser(t) {
                   "div",
                   { className: "pw-drop-list" },
                   (t.notesDirs || []).map((i) =>
-                    e(
-                      "button",
-                      {
-                        key: i,
-                        className: "pw-drop-row",
-                        onClick: () => {
-                          (D(!1), selectNotesDir(i));
-                        },
+                    dropRowEl({
+                      k: i,
+                      cur: l === i,
+                      onClick: () => {
+                        (D(!1), selectNotesDir(i));
                       },
-                      e("span", { className: "pw-check" }, l === i ? "✓" : ""),
-                      e("span", { className: "pw-mono" }, baseName(i)),
-                    ),
+                      label: baseName(i),
+                    }),
                   ),
                 ),
                 e(

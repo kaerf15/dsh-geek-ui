@@ -36,6 +36,7 @@ window.__ModuleLoader__.load({
     const PREVIEW_HIDE_DELAY = 250;
     const NAVIGATION_ACTIVE_LOCK_MS = 1600;
     const MAX_PENDING_ATTEMPTS = 12;
+    const FACE_RETRY_MS = 500;
 
     /* ------------------------------------------------------------------ */
     /* Styles (ported from pi-web ChatMinimap.module.css, dshm- scoped)    */
@@ -342,18 +343,33 @@ body[data-ds-dark-theme] .dshm-root {
       const headings = [];
       let inFence = false;
       let firstParagraph = null;
+      let prevTextLine = null;
       for (const raw of lines) {
         const line = raw.trimEnd();
-        if (/^\s*```/.test(line) || /^\s*~~~/.test(line)) { inFence = !inFence; continue; }
+        if (/^\s*```/.test(line) || /^\s*~~~/.test(line)) { inFence = !inFence; prevTextLine = null; continue; }
         if (inFence) continue;
-        const m = /^(#{1,6})\s+(.+)$/.exec(line);
+        // (review fix) Count with the renderer's grammar (mdast/CommonMark),
+        // not a subset of it, or headingIndex drifts from the DOM: ATX allows
+        // up to 3 leading spaces, and a plain text line underlined by === /
+        // --- renders as a setext h1/h2 too. Plain = not a list/quote/table
+        // line, so "- item\n---" (setext inside a list item, excluded DOM-side
+        // by queryOutlineHeadings) and table separators never count.
+        const m = /^ {0,3}(#{1,6})\s+(.+)$/.exec(line);
         if (m) {
           if (m[1].length <= 3) headings.push({ level: m[1].length, text: stripInline(m[2]) });
+          prevTextLine = null;
           continue;
         }
-        if (firstParagraph === null && line.trim().length > 0 && !/^\s*([-*+]|\d+\.)\s/.test(line) && !/^\s*>/.test(line) && !/^\s*\|/.test(line)) {
+        if (prevTextLine !== null && /^ {0,3}(=+|-+)\s*$/.test(line)) {
+          headings.push({ level: line.trim()[0] === '=' ? 1 : 2, text: stripInline(prevTextLine) });
+          prevTextLine = null;
+          continue;
+        }
+        const isPlainText = line.trim().length > 0 && !/^\s*([-*+]|\d+\.)\s/.test(line) && !/^\s*>/.test(line) && !/^\s*\|/.test(line);
+        if (firstParagraph === null && isPlainText) {
           firstParagraph = stripInline(line);
         }
+        prevTextLine = isPlainText ? line : null;
       }
       if (headings.length > 0) return { headings, paragraph: null };
       return { headings: [], paragraph: firstParagraph };
@@ -421,6 +437,21 @@ body[data-ds-dark-theme] .dshm-root {
       }
     }
 
+    // (review fix) Heading locator with the same counting grammar as
+    // extractOutline, so headingIndex means the same thing on both sides.
+    // Excluded: the platform's screen-reader-only footnote h2 (ui-primitives
+    // markdown render.tsx injects <h2 id="footnote-label" class="sr-only"> —
+    // private surface, re-check on upgrades), aria-hidden decor, and headings
+    // nested in blockquotes/lists/tables (invisible to the outline grammar).
+    function queryOutlineHeadings(aEl) {
+      return Array.from(aEl.querySelectorAll('h1, h2, h3')).filter((el) => {
+        if (el.classList.contains('sr-only') || el.closest('.sr-only')) return false;
+        if (el.id === 'footnote-label') return false;
+        if (el.getAttribute('aria-hidden') === 'true') return false;
+        return !el.closest('blockquote, ul, ol, table');
+      });
+    }
+
     // The chat content column carries data-chat-flow (max-width:
     // var(--dsh-chat-content-width), centered).
     function findContentColumn(scrollEl) {
@@ -443,6 +474,7 @@ body[data-ds-dark-theme] .dshm-root {
       const listState = useObservable(sessions.list);
       const sessionId = listState && listState.current;
 
+      const [faceRetryTick, setFaceRetryTick] = useState(0);
       const face = useMemo(() => {
         if (!sessionId) return undefined;
         try {
@@ -451,7 +483,16 @@ body[data-ds-dark-theme] .dshm-root {
         } catch {
           return undefined;
         }
-      }, [sessions, sessionId]);
+      }, [sessions, sessionId, faceRetryTick]);
+      // (review fix) Never negatively cache the face lookup: scope() can
+      // throw or come back undefined transiently during a session switch, and
+      // a memoized undefined hid the rail until the next switch. Retry on a
+      // slow timer while unresolved; the effect timer self-clears on success.
+      useEffect(() => {
+        if (face || !sessionId) return undefined;
+        const timer = setTimeout(() => setFaceRetryTick((n) => n + 1), FACE_RETRY_MS);
+        return () => clearTimeout(timer);
+      }, [face, sessionId]);
       const snapshot = useObservable(face);
 
       const turns = useMemo(() => buildTurns(snapshot), [snapshot]);
@@ -484,12 +525,28 @@ body[data-ds-dark-theme] .dshm-root {
       const pendingNavigationRef = useRef(null);
       const pendingAttemptsRef = useRef(0);
       const measureThrottleRef = useRef(null);
+      // (review fix) Live scrollport tracked by the attach effect + pending
+      // rAF id, so the scroll hot path syncs off cached geometry instead of
+      // re-running measureFrame's forced layouts per scroll event.
+      const scrollElRef = useRef(null);
+      const scrollRafRef = useRef(null);
+      // (review fix) Pending-navigation retry timers are tracked: cleared on
+      // unmount and on session switch, with a liveness check inside the
+      // callback so a dead instance never touches platform DOM.
+      const mountedRef = useRef(true);
+      const retryTimersRef = useRef(new Set());
+      // (review fix) Re-resolve hook for the details-column observer, driven
+      // by the scroll-attach path on every structural rewire.
+      const detailsReattachRef = useRef(() => {});
 
       // turn.key -> measured absolute scrollTop (null while not rendered)
       const turnTopsRef = useRef([]);
       const layoutRef = useRef({ topRatios: [], gap: MAX_NODE_GAP, fillsHeight: false });
       const turnsRef = useRef(turns);
       turnsRef.current = turns;
+      // (review fix) The attach effect polls only while a session is current.
+      const sessionActiveRef = useRef(false);
+      sessionActiveRef.current = !!sessionId;
 
       const layout = useMemo(() => layoutNodes(nodeCount, minimapHeight), [nodeCount, minimapHeight]);
       layoutRef.current = layout;
@@ -523,6 +580,10 @@ body[data-ds-dark-theme] .dshm-root {
         setActiveIndex(best);
       }, []);
 
+      // (review fix) Forced-layout path (getComputedStyle + the gutter
+      // fixpoint's read/write cycles): only the 150ms-throttled measureNodes
+      // calls this. The scroll listener never does — scrolling cannot move
+      // the scrollport, so scroll events sync off cached geometry instead.
       const measureFrame = useCallback(() => {
         const scrollEl = findScrollport();
         if (!scrollEl) return null;
@@ -614,7 +675,7 @@ body[data-ds-dark-theme] .dshm-root {
         } else if (pending.target === 'heading') {
           const a = assistantIndex >= 0 ? turn.assistants[assistantIndex] : null;
           const aEl = a ? findNodeElement(scrollEl, a.key) : null;
-          targetEl = aEl ? aEl.querySelectorAll('h1, h2, h3').item(pending.headingIndex) : null;
+          targetEl = aEl ? queryOutlineHeadings(aEl)[pending.headingIndex] || null : null;
         }
         if (targetEl) {
           pendingNavigationRef.current = null;
@@ -662,70 +723,141 @@ body[data-ds-dark-theme] .dshm-root {
         }, 150);
       }, [measureFrame, resolvePending, syncActiveNode]);
 
-      const updateScroll = useCallback(() => {
-        const scrollEl = measureFrame();
+      // (review fix) Scroll-path sync reads scroll offsets only — no
+      // measureFrame, no forced layout. Geometry changes arrive through the
+      // throttled measureNodes path (RO / resize / turn changes).
+      const syncScrollState = useCallback((scrollEl) => {
         if (!scrollEl) { setVisible(false); return; }
         setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20 && turnsRef.current.length > 0 && !detailsOpenRef.current);
         syncActiveNode(scrollEl);
-      }, [measureFrame, syncActiveNode]);
+      }, [syncActiveNode]);
+
+      // (review fix) rAF-batched scroll sync: bursts of scroll events within
+      // one frame collapse into a single state update.
+      const scheduleScrollSync = useCallback(() => {
+        if (scrollRafRef.current !== null) return;
+        scrollRafRef.current = requestAnimationFrame(() => {
+          scrollRafRef.current = null;
+          syncScrollState(scrollElRef.current);
+        });
+      }, [syncScrollState]);
+
+      const clearRetryTimers = useCallback(() => {
+        for (const timer of retryTimersRef.current) clearTimeout(timer);
+        retryTimersRef.current.clear();
+      }, []);
+
+      // (review fix) Tracked replacement for the bare setTimeout(250) retries.
+      const scheduleMeasureRetry = useCallback((ms) => {
+        const timer = setTimeout(() => {
+          retryTimersRef.current.delete(timer);
+          if (!mountedRef.current) return;
+          measureNodes();
+        }, ms);
+        retryTimersRef.current.add(timer);
+      }, [measureNodes]);
+
+      useEffect(() => () => {
+        mountedRef.current = false;
+        clearRetryTimers();
+      }, [clearRetryTimers]);
+
+      // Session switch: retries scheduled against the old session's DOM must
+      // not fire into the new one (the pending navigation itself resolves by
+      // turn key and dies not-found in resolvePending).
+      useEffect(() => { clearRetryTimers(); }, [sessionId, clearRetryTimers]);
 
       // Scroll listener (attached to whatever scrollport is live).
       useEffect(() => {
         let el = null;
         let ro = null;
+        let mo = null;
         let seatEl = null;
+        let childEl = null;
+        let poll = null;
         let cancelled = false;
+        const stopPoll = () => {
+          if (poll !== null) { clearInterval(poll); poll = null; }
+        };
+        // (review fix) The poll only hunts for a scrollport that is not there
+        // yet: once attached it stops (structural swaps are caught by the
+        // childList observer below), and it never runs without a current
+        // session — an inactive conversation keeps no timers at all.
+        const startPoll = () => {
+          if (poll === null && sessionActiveRef.current) poll = setInterval(attach, 800);
+        };
         const attach = () => {
           if (cancelled) return;
-          const next = findScrollport();
+          const next = sessionActiveRef.current ? findScrollport() : null;
           const seat = next ? next.querySelector('[data-composer-seat]') : null;
-          // Re-attach when the scrollport OR the composer seat is replaced
-          // (phase switches swap the seat; a detached seat's RO never fires).
-          if (next === el && seat === seatEl) return;
-          if (el) el.removeEventListener('scroll', updateScroll);
+          const child = next ? next.firstElementChild : null;
+          // Re-attach when the scrollport, the composer seat, OR the content
+          // root is replaced (phase switches swap the seat; a session-view
+          // remount swaps firstElementChild under an unchanged scrollport —
+          // a RO left on the detached node never fires again).
+          if (next === el && seat === seatEl && child === childEl) return;
+          if (el) el.removeEventListener('scroll', scheduleScrollSync);
           if (ro) ro.disconnect();
+          if (mo) mo.disconnect();
           el = next;
           seatEl = seat;
+          childEl = child;
           ro = null;
+          mo = null;
+          scrollElRef.current = el;
+          // The overlay host lives one structural layer up: any rewire here
+          // is also the moment to re-resolve the details-gate target.
+          detailsReattachRef.current();
           if (el) {
-            el.addEventListener('scroll', updateScroll, { passive: true });
-            ro = new ResizeObserver(() => { measureNodes(); updateScroll(); });
+            el.addEventListener('scroll', scheduleScrollSync, { passive: true });
+            ro = new ResizeObserver(() => { measureNodes(); scheduleScrollSync(); });
             ro.observe(el);
-            if (el.firstElementChild) ro.observe(el.firstElementChild);
+            if (childEl) ro.observe(childEl);
             // Composer growth (multi-line input) moves the seat's top edge;
             // observe it so the rail's bottom follows without a scroll.
             if (seatEl) ro.observe(seatEl);
+            // Seat / content-root swaps keep the same scrollport node; re-key
+            // on childList instead of polling (both are direct children).
+            mo = new MutationObserver(attach);
+            mo.observe(el, { childList: true });
             measureNodes();
-            updateScroll();
+            syncScrollState(el);
+            stopPoll();
           } else {
             setVisible(false);
+            startPoll();
           }
         };
         attach();
-        const poll = setInterval(attach, 800);
-        const onResize = () => { measureNodes(); updateScroll(); };
+        const onResize = () => { measureNodes(); scheduleScrollSync(); };
         window.addEventListener('resize', onResize);
         return () => {
           cancelled = true;
-          clearInterval(poll);
+          stopPoll();
           restoreGutter(gutterElRef);
           gutterPadRef.current = 0;
           window.removeEventListener('resize', onResize);
-          if (el) el.removeEventListener('scroll', updateScroll);
+          if (el) el.removeEventListener('scroll', scheduleScrollSync);
           if (ro) ro.disconnect();
+          if (mo) mo.disconnect();
+          scrollElRef.current = null;
+          if (scrollRafRef.current !== null) {
+            cancelAnimationFrame(scrollRafRef.current);
+            scrollRafRef.current = null;
+          }
           if (measureThrottleRef.current) {
             clearTimeout(measureThrottleRef.current);
             measureThrottleRef.current = null;
           }
         };
-      }, [measureNodes, updateScroll]);
+      }, [measureNodes, syncScrollState, scheduleScrollSync, sessionId]);
 
       // Re-measure when the conversation changes.
       const turnSignature = useMemo(() => turns.map((t) => t.key).join('|'), [turns]);
       useEffect(() => {
-        const timer = setTimeout(() => { measureNodes(); updateScroll(); }, 50);
+        const timer = setTimeout(() => { measureNodes(); scheduleScrollSync(); }, 50);
         return () => clearTimeout(timer);
-      }, [turnSignature, sessionId, measureNodes, updateScroll]);
+      }, [turnSignature, sessionId, measureNodes, scheduleScrollSync]);
 
       const scrollToTopOf = useCallback((el, behavior) => {
         const scrollEl = findScrollport();
@@ -747,11 +879,11 @@ body[data-ds-dark-theme] .dshm-root {
           pendingNavigationRef.current = { turnKey: turn.key, target: 'user' };
           pendingAttemptsRef.current = 0;
           scrollEl.scrollTo({ top: 0, behavior: 'auto' });
-          setTimeout(() => measureNodes(), 250);
+          scheduleMeasureRetry(250);
           return;
         }
         scrollToTopOf(el, behavior);
-      }, [lockActiveNode, measureNodes, scrollToTopOf]);
+      }, [lockActiveNode, scheduleMeasureRetry, scrollToTopOf]);
 
       const scrollToAssistant = useCallback((nodeIndex, assistantIndex) => {
         const scrollEl = findScrollport();
@@ -772,12 +904,12 @@ body[data-ds-dark-theme] .dshm-root {
           pendingNavigationRef.current = { turnKey: turn.key, assistantKey: a.key, target: 'assistant' };
           pendingAttemptsRef.current = 0;
           scrollEl.scrollTo({ top: 0, behavior: 'auto' });
-          setTimeout(() => measureNodes(), 250);
+          scheduleMeasureRetry(250);
           return;
         }
         lockActiveNode(nodeIndex);
         scrollToTopOf(el, 'smooth');
-      }, [lockActiveNode, measureNodes, scrollToTopOf]);
+      }, [lockActiveNode, scheduleMeasureRetry, scrollToTopOf]);
 
       const scrollToHeading = useCallback((nodeIndex, assistantIndex, headingIndex) => {
         const scrollEl = findScrollport();
@@ -796,14 +928,14 @@ body[data-ds-dark-theme] .dshm-root {
           pendingNavigationRef.current = { turnKey: turn.key, assistantKey: a.key, headingIndex, target: 'heading' };
           pendingAttemptsRef.current = 0;
           scrollEl.scrollTo({ top: 0, behavior: 'auto' });
-          setTimeout(() => measureNodes(), 250);
+          scheduleMeasureRetry(250);
           return;
         }
-        const heading = aEl.querySelectorAll('h1, h2, h3').item(headingIndex);
+        const heading = queryOutlineHeadings(aEl)[headingIndex] || null;
         if (!heading) return;
         lockActiveNode(nodeIndex);
         scrollToTopOf(heading, 'smooth');
-      }, [lockActiveNode, measureNodes, scrollToTopOf]);
+      }, [lockActiveNode, scheduleMeasureRetry, scrollToTopOf]);
 
       const findNearestNode = useCallback((ratio) => {
         const { topRatios, gap, fillsHeight } = layoutRef.current;
@@ -850,10 +982,10 @@ body[data-ds-dark-theme] .dshm-root {
       // hover remnant so the rail's return starts clean. On close: re-measure
       // (measureFrame re-derives the gutter for the now-visible rail).
       useEffect(() => {
-        const overlayHost = document.querySelector('[data-shell-overlay]');
-        const frameEl = overlayHost && overlayHost.parentElement;
-        if (!frameEl) return undefined;
+        let mo = null;
+        let frameEl = null;
         const syncDetailsGate = () => {
+          if (!frameEl) return;
           const open = !frameEl.hasAttribute('data-details-collapsed');
           if (open === detailsOpenRef.current) return;
           detailsOpenRef.current = open;
@@ -866,16 +998,38 @@ body[data-ds-dark-theme] .dshm-root {
             setVisible(false);
           } else {
             measureNodes();
-            updateScroll();
+            scheduleScrollSync();
           }
         };
-        syncDetailsGate();
-        const mo = new MutationObserver(syncDetailsGate);
-        mo.observe(frameEl, { attributes: true, attributeFilter: ['data-details-collapsed'] });
-        return () => mo.disconnect();
-      }, [measureNodes, updateScroll, cancelPreviewHide]);
+        // (review fix) Follow the observed frame's lifecycle: the
+        // scroll-attach path invokes this on every structural rewire, so a
+        // replaced shell.overlay host re-resolves the AppFrame root and
+        // re-observes it instead of watching a detached node forever.
+        const reattach = () => {
+          const overlayHost = document.querySelector('[data-shell-overlay]');
+          const next = overlayHost ? overlayHost.parentElement : null;
+          if (next === frameEl) return;
+          if (mo) mo.disconnect();
+          frameEl = next;
+          mo = null;
+          if (frameEl) {
+            syncDetailsGate();
+            mo = new MutationObserver(syncDetailsGate);
+            mo.observe(frameEl, { attributes: true, attributeFilter: ['data-details-collapsed'] });
+          }
+        };
+        detailsReattachRef.current = reattach;
+        reattach();
+        return () => {
+          detailsReattachRef.current = () => {};
+          if (mo) mo.disconnect();
+        };
+      }, [measureNodes, scheduleScrollSync, cancelPreviewHide]);
 
       const handleMouseDown = useCallback((event) => {
+        // (review fix) Primary button only: middle/right presses must not
+        // start a scrub (middle-click autoscroll would fight the drag).
+        if (event.button !== 0) return;
         if (!visible) return;
         draggingRef.current = true;
         showPreview();

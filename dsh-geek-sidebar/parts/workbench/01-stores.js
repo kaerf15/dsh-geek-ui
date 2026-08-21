@@ -1,12 +1,34 @@
-const P = "pw-",
+/* 评审修复：会话桶 LRU 上限——原先 buckets 只增不减，随会话数无界增长 */
+const STORE_MAX_BUCKETS = 50,
   store = {
     buckets: {},
     bucket(t) {
-      const e = t || "_";
-      return (
-        store.buckets[e] || (store.buckets[e] = { files: [], active: null }),
-        store.buckets[e]
-      );
+      const e = t || "_",
+        bs = store.buckets;
+      let b = bs[e];
+      /* 命中即提为最新（删了重挂，对象键序即新旧序） */
+      if (b) return (delete bs[e]), (bs[e] = b), b;
+      b = bs[e] = { files: [], active: null };
+      /* 评审修复：超额淘汰最旧的非当前会话桶（空桶优先，都不空才连文件态忍痛淘）。
+       * sessionProbe 在 06-misc，本文件被 smoke 单独 eval 时它不在——typeof 守卫同 02 的 CODE_LANGS 例 */
+      const ks = Object.keys(bs);
+      if (ks.length > STORE_MAX_BUCKETS) {
+        const act = typeof sessionProbe !== "undefined" ? sessionProbe.sid : null;
+        let v = null;
+        for (const k of ks)
+          if (k !== e && !(act && k === act) && bs[k].files.length === 0) {
+            v = k;
+            break;
+          }
+        if (!v)
+          for (const k of ks)
+            if (k !== e && !(act && k === act)) {
+              v = k;
+              break;
+            }
+        v && delete bs[v];
+      }
+      return b;
     },
     open(t, e) {
       const s = store.bucket(t);
@@ -167,9 +189,12 @@ function relTime(t) {
   const a = Math.floor(o / 24);
   return a < 30 ? a + "d ago" : new Date(t).toLocaleDateString();
 }
-function shortPath(t) {
-  return t ? t.replace(/^\/Users\/[^/]+/, "~") : "";
-}
+/* 评审修复（去重 #7）：shortPath 本体已删——唯一定义在 skills.js 的 shortenPath
+ *（/Users 与 /home 双前缀，是原 shortPath 的超集，行为逐点保持；已用真实 bundle
+ * 结构探针验证作用域链解析）。skills.js 与 workbench IIFE 同属 factory 作用域且
+ * function 声明整体提升，IIFE 内经作用域链取用，与拼接先后无关。
+ * smoke 静态断言守着这个依赖（skills.js 改名/删除即红）。
+ * 注：PencilIcon 未一并收敛（skills 版 11px 固定 vs 本侧 13px 参数化），见 05-icons */
 function canonPath(t) {
   return String(t || "")
     .replace(/\/+$/, "")
@@ -179,3 +204,8 @@ function canonPath(t) {
  * 全部在渲染/回调期读写（无求值期依赖），声明放 stores 文件合乎归属（原寄居 05-icons 末尾）。 */
 let explorerOpenPref = !0,
   currentRootPath = null;
+/* 评审修复：root 变更一律走 setter 发 bus 节拍——裸赋值时订阅方（终端换绑等）
+ * 感知不到切换；读取侧不变，仍直接读 currentRootPath */
+const setCurrentRootPath = (t) => {
+  currentRootPath !== t && ((currentRootPath = t), bus.fire());
+};

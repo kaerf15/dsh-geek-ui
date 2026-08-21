@@ -121,9 +121,32 @@ function TerminalView() {
     });
     ro.observe(host);
     connect();
+    /* 评审修复：bus 节拍上比对连接参数键（sid|root），变化即平推重连——原版 wsUrl 的
+     * sessionId/cwd 在建连时捕获，切换会话/项目后终端仍挂旧绑定。root 经 01 的
+     * setCurrentRootPath 发节拍，sid 经 sessionProbe.set 发节拍，两处都能捕到。
+     * 平推不算失败：置空 onclose 不走退避，xterm 保留 scrollback 仅换 pty 绑定 */
+    let lastKey = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
+    const paramSub = bus.sub(() => {
+      if (closed) return;
+      const k2 = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
+      if (k2 === lastKey) return;
+      lastKey = k2;
+      failures = 0;
+      clearTimeout(retryTimer);
+      try {
+        if (socket) {
+          socket.onclose = null;
+          socket.close();
+        }
+      } catch (e9) {}
+      connect();
+    });
     return () => {
       closed = true;
       clearTimeout(retryTimer);
+      try {
+        paramSub();
+      } catch (e9) {}
       try {
         ro.disconnect();
       } catch (e4) {}
@@ -191,7 +214,20 @@ function BottomPanel(t) {
     if (!col) return undefined;
     if (!col.style.transition) col.style.transition = "padding-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
     col.style.paddingBottom = bottomPanel.open && !yielded ? bottomPanel.height + "px" : "0px";
+    /* 评审修复：卸载（插件热更）/依赖轮换时归零，别让挤压 padding 残留在平台列上 */
+    return () => {
+      col.style.paddingBottom = "0px";
+    };
   }, [bottomPanel.open, bottomPanel.height, yielded]);
+  /* 评审修复：拖拽中的 document 监听登记到 ref，面板卸载（让位/热更）时兜底摘除——
+   * 原只在 mouseup 才摘，拖拽中卸载会永久泄漏一对监听器。hooks 须在上方 early return 之前 */
+  const dragOff = React.useRef(null);
+  React.useEffect(
+    () => () => {
+      dragOff.current && dragOff.current();
+    },
+    [],
+  );
   if (!mounted || !rect || yielded) return null;
   const startDrag = (ev) => {
     ev.preventDefault();
@@ -202,11 +238,15 @@ function BottomPanel(t) {
       bottomPanel.set({ height: h });
     };
     const up = () => {
-      document.removeEventListener("mousemove", mv);
-      document.removeEventListener("mouseup", up);
+      dragOff.current && dragOff.current();
       try {
         window.localStorage.setItem("pw-bpanel-h", String(bottomPanel.height));
       } catch (e9) {}
+    };
+    dragOff.current = () => {
+      (document.removeEventListener("mousemove", mv),
+        document.removeEventListener("mouseup", up),
+        (dragOff.current = null));
     };
     document.addEventListener("mousemove", mv);
     document.addEventListener("mouseup", up);

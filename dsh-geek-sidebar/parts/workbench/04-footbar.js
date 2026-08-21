@@ -1,7 +1,7 @@
 function FootBar(t) {
-  const e = React.createElement,
-    s = useView(),
-    o = useFilesTab();
+  const e = React.createElement;
+  /* 评审修复：删掉 useView()/useFilesTab() 两个"只为订阅、返回值从未使用"的废调用——
+   * 重渲染由下面这条 bus 订阅一肩挑（acp 徽标 / bottomPanel 开态全走 bus） */
   const [, force] = React.useState(0);
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   return t.wide === !1

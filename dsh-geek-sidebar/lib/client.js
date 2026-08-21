@@ -115,15 +115,37 @@ const workbenchMod = (function (React, host) {
 /* workbench feature 维护源码（可读版）：侧栏（工作区/会话/git worktree）、文件管理器（项目/笔记）、
  * 文件预览（大纲/编辑/聚焦重读/手动刷新）、底栏（技能/助手入口）。
  * 由 parts/build.mjs 与 head.js / skills.js / tail.js 拼接成 lib/client.js；改这里，别改产物。 */
-const P = "pw-",
+/* 评审修复：会话桶 LRU 上限——原先 buckets 只增不减，随会话数无界增长 */
+const STORE_MAX_BUCKETS = 50,
   store = {
     buckets: {},
     bucket(t) {
-      const e = t || "_";
-      return (
-        store.buckets[e] || (store.buckets[e] = { files: [], active: null }),
-        store.buckets[e]
-      );
+      const e = t || "_",
+        bs = store.buckets;
+      let b = bs[e];
+      /* 命中即提为最新（删了重挂，对象键序即新旧序） */
+      if (b) return (delete bs[e]), (bs[e] = b), b;
+      b = bs[e] = { files: [], active: null };
+      /* 评审修复：超额淘汰最旧的非当前会话桶（空桶优先，都不空才连文件态忍痛淘）。
+       * sessionProbe 在 06-misc，本文件被 smoke 单独 eval 时它不在——typeof 守卫同 02 的 CODE_LANGS 例 */
+      const ks = Object.keys(bs);
+      if (ks.length > STORE_MAX_BUCKETS) {
+        const act = typeof sessionProbe !== "undefined" ? sessionProbe.sid : null;
+        let v = null;
+        for (const k of ks)
+          if (k !== e && !(act && k === act) && bs[k].files.length === 0) {
+            v = k;
+            break;
+          }
+        if (!v)
+          for (const k of ks)
+            if (k !== e && !(act && k === act)) {
+              v = k;
+              break;
+            }
+        v && delete bs[v];
+      }
+      return b;
     },
     open(t, e) {
       const s = store.bucket(t);
@@ -284,9 +306,12 @@ function relTime(t) {
   const a = Math.floor(o / 24);
   return a < 30 ? a + "d ago" : new Date(t).toLocaleDateString();
 }
-function shortPath(t) {
-  return t ? t.replace(/^\/Users\/[^/]+/, "~") : "";
-}
+/* 评审修复（去重 #7）：shortPath 本体已删——唯一定义在 skills.js 的 shortenPath
+ *（/Users 与 /home 双前缀，是原 shortPath 的超集，行为逐点保持；已用真实 bundle
+ * 结构探针验证作用域链解析）。skills.js 与 workbench IIFE 同属 factory 作用域且
+ * function 声明整体提升，IIFE 内经作用域链取用，与拼接先后无关。
+ * smoke 静态断言守着这个依赖（skills.js 改名/删除即红）。
+ * 注：PencilIcon 未一并收敛（skills 版 11px 固定 vs 本侧 13px 参数化），见 05-icons */
 function canonPath(t) {
   return String(t || "")
     .replace(/\/+$/, "")
@@ -296,8 +321,15 @@ function canonPath(t) {
  * 全部在渲染/回调期读写（无求值期依赖），声明放 stores 文件合乎归属（原寄居 05-icons 末尾）。 */
 let explorerOpenPref = !0,
   currentRootPath = null;
+/* 评审修复：root 变更一律走 setter 发 bus 节拍——裸赋值时订阅方（终端换绑等）
+ * 感知不到切换；读取侧不变，仍直接读 currentRootPath */
+const setCurrentRootPath = (t) => {
+  currentRootPath !== t && ((currentRootPath = t), bus.fire());
+};
 const isMd = (t) => /\.(md|markdown)$/i.test(t);
-function mdInline(t) {
+/* 评审修复：bd（链接/图片解析基目录）显式传参——原经 12-mdpath 的模块级
+ * var mdBaseDir 隐式传递，渲染期写共享态（并发/顺序敏感）。行为逐点保持 */
+function mdInline(t, bd) {
   const e = [],
     s =
       /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`]+`|!\[[^\]]*\]\([^)]*\)|\[[^\]]+\]\([^)]*\))/g;
@@ -324,11 +356,11 @@ function mdInline(t) {
       e.push(
         React.createElement("img", {
           key: l++,
-          src: mediaUrl(u[2]),
+          src: mediaUrl(u[2], bd),
           alt: u[1],
           style: { maxWidth: "100%" },
           onClick: (g) => {
-            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2])));
+            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2], bd)));
           },
           onError: (g) => {
             const t = g.currentTarget;
@@ -351,7 +383,7 @@ function mdInline(t) {
             target: "_blank",
             rel: "noreferrer",
             onClick: (g) => {
-              const p = resolveLocalPath(u[2]);
+              const p = resolveLocalPath(u[2], bd);
               p && (g.preventDefault(), openLocalPath(p));
             },
           },
@@ -364,7 +396,7 @@ function mdInline(t) {
   return (o < t.length && e.push(t.slice(o)), e);
 }
 function renderMarkdown(t, e, bd) {
-  mdBaseDir = typeof bd == "string" ? bd : "";
+  bd = typeof bd == "string" ? bd : "";
   const s = String(t).replace(
       /\r\n/g,
       `
@@ -416,7 +448,7 @@ function renderMarkdown(t, e, bd) {
             e[g] = y;
           }));
       }
-      (o.push(c("h" + m[1].length, h, mdInline(m[2]))), a++);
+      (o.push(c("h" + m[1].length, h, mdInline(m[2], bd))), a++);
       continue;
     }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(r)) {
@@ -431,7 +463,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "blockquote",
           { key: l++, className: "pw-quote" },
-          mdInline(h.join(" ")),
+          mdInline(h.join(" "), bd),
         ),
       );
       continue;
@@ -462,7 +494,7 @@ function renderMarkdown(t, e, bd) {
             c(
               "tr",
               null,
-              g.map((x, p) => c("th", { key: p }, mdInline(x))),
+              g.map((x, p) => c("th", { key: p }, mdInline(x, bd))),
             ),
           ),
           c(
@@ -472,7 +504,7 @@ function renderMarkdown(t, e, bd) {
               c(
                 "tr",
                 { key: p },
-                x.map((C, I) => c("td", { key: I }, mdInline(C))),
+                x.map((C, I) => c("td", { key: I }, mdInline(C, bd))),
               ),
             ),
           ),
@@ -488,7 +520,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "ul",
           { key: l++, className: "pw-list" },
-          h.map((g, y) => c("li", { key: y }, mdInline(g))),
+          h.map((g, y) => c("li", { key: y }, mdInline(g, bd))),
         ),
       );
       continue;
@@ -501,7 +533,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "ol",
           { key: l++, className: "pw-list" },
-          h.map((g, y) => c("li", { key: y }, mdInline(g))),
+          h.map((g, y) => c("li", { key: y }, mdInline(g, bd))),
         ),
       );
       continue;
@@ -521,7 +553,7 @@ function renderMarkdown(t, e, bd) {
         break;
       (k.push(h), a++);
     }
-    o.push(c("p", { key: l++, className: "pw-p" }, mdInline(k.join(" "))));
+    o.push(c("p", { key: l++, className: "pw-p" }, mdInline(k.join(" "), bd)));
   }
   return o;
 }
@@ -535,9 +567,9 @@ function TreeNode(t) {
     u = o.children[e.path],
     r = !!o.loading[e.path],
     m = t.activePath === e.path,
-    h2 = React.useState(!1),
-    g2 = h2[0],
-    C2 = h2[1],
+    h2 = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id 用常量 1） */
+    g2 = h2[0] === 1,
+    C2 = (v) => (v ? h2[1](1) : h2[2]()),
     doDel = () => {
       (C2(!1), t.onDelete && t.onDelete(e));
     },
@@ -826,12 +858,10 @@ function FileBrowser(t) {
             e(
               "span",
               { className: "pw-mono" + (l ? " pw-tail" : " dim") },
-              l ? "\u200e" + shortPath(l) : "选择笔记目录…",
+              l ? "\u200e" + shortenPath(l) : "选择笔记目录…",
             ),
           ),
-          E
-            ? e("div", { className: "pw-drop-overlay", onClick: () => D(!1) })
-            : null,
+          E ? dropOverlayEl(() => D(!1)) : null,
           E
             ? e(
                 "div",
@@ -840,18 +870,14 @@ function FileBrowser(t) {
                   "div",
                   { className: "pw-drop-list" },
                   (t.notesDirs || []).map((i) =>
-                    e(
-                      "button",
-                      {
-                        key: i,
-                        className: "pw-drop-row",
-                        onClick: () => {
-                          (D(!1), selectNotesDir(i));
-                        },
+                    dropRowEl({
+                      k: i,
+                      cur: l === i,
+                      onClick: () => {
+                        (D(!1), selectNotesDir(i));
                       },
-                      e("span", { className: "pw-check" }, l === i ? "✓" : ""),
-                      e("span", { className: "pw-mono" }, baseName(i)),
-                    ),
+                      label: baseName(i),
+                    }),
                   ),
                 ),
                 e(
@@ -980,9 +1006,9 @@ function FileBrowser(t) {
   );
 }
 function FootBar(t) {
-  const e = React.createElement,
-    s = useView(),
-    o = useFilesTab();
+  const e = React.createElement;
+  /* 评审修复：删掉 useView()/useFilesTab() 两个"只为订阅、返回值从未使用"的废调用——
+   * 重渲染由下面这条 bus 订阅一肩挑（acp 徽标 / bottomPanel 开态全走 bus） */
   const [, force] = React.useState(0);
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   return t.wide === !1
@@ -1061,6 +1087,9 @@ function ic(t, e) {
     e,
   );
 }
+/* PencilIcon 与 skills.js 的同名图标不算可去重的重复：skills.js 版是 11px 固定尺寸
+ *（技能弹窗专用），本版参数化且两个调用点（08/11）都是 13px——统一需动 skills.js 或
+ * head.js 共享层（评审修复轮均划为禁区），保持各自本体（评审修复 #7 只收敛了 shortPath） */
 function PencilIcon(t) {
   return ic(
     [["p", "M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"]],
@@ -1304,6 +1333,48 @@ function mentionPath(t, e) {
     (e ? "/ " : " ")
   );
 }
+/* 评审修复：两击确认状态机——原 03 树删除 / 08 归档 / 09 worktree / 15-acp 历史
+ * 四处各抄一份 useState。返回 [armedId, ask(id), cancel()]；布尔场景用常量 id（如 1）。
+ * 各调用点以适配器保持原签名（is(id) === (armed === id)），行为逐点不变 */
+function useTwoClick() {
+  const t = React.useState(null);
+  return [t[0], t[1], () => t[1](null)];
+}
+/* 评审修复：下拉骨架三件套（遮罩 / 过滤框 / 选项行）——原 03 笔记目录、09 项目、
+ * 09 worktree 三处复制同一套 pw-drop-* 结构。行尾徽标等额外子节点经 extra 注入 */
+const dropOverlayEl = (t) =>
+    React.createElement("div", {
+      className: "pw-drop-overlay",
+      onClick: t,
+    }),
+  dropFilterEl = (t, e, s) =>
+    React.createElement(
+      "div",
+      { className: "pw-drop-filter" },
+      React.createElement("input", {
+        className: "pw-input",
+        value: t,
+        placeholder: e,
+        onChange: (o) => s(o.target.value),
+      }),
+    ),
+  dropRowEl = (t) =>
+    React.createElement(
+      "button",
+      {
+        key: t.k,
+        className: "pw-drop-row" + (t.cur ? " cur" : ""),
+        title: t.title,
+        onClick: t.onClick,
+      },
+      React.createElement(
+        "span",
+        { className: "pw-check" },
+        t.cur ? "✓" : "",
+      ),
+      React.createElement("span", { className: "pw-mono" }, t.label),
+      t.extra || null,
+    );
 const CODE_KW = {
     js: "const let var function return if else for while class extends import export from default new try catch finally throw async await yield typeof instanceof in of switch case break continue this null undefined true false interface type enum implements readonly public private static",
     py: "def return if elif else for while class import from as with try except finally raise lambda yield async await pass break continue global nonlocal is in not and or True False None self print",
@@ -1503,9 +1574,9 @@ function SessionRow(t) {
     m = React.useState(""),
     k = m[0],
     h = m[1],
-    g = React.useState(!1),
-    y = g[0],
-    x = g[1],
+    g = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id 用常量 1） */
+    y = g[0] === 1,
+    x = (v) => (v ? g[1](1) : g[2]()),
     p = React.useState(!1),
     C = p[0],
     I = p[1],
@@ -1686,9 +1757,9 @@ function Sidebar(t) {
     fe = React.useState(""),
     de = fe[0],
     V = fe[1],
-    he = React.useState(null),
+    he = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id=worktree 路径） */
     Ae = he[0],
-    le = he[1],
+    le = (id) => (id == null ? he[2]() : he[1](id)),
     me = React.useState(explorerOpenPref),
     pe = me[0],
     Be = me[1],
@@ -1754,7 +1825,7 @@ function Sidebar(t) {
     },
     M = ee(p);
   (React.useEffect(() => {
-    currentRootPath = p;
+    setCurrentRootPath(p); /* 评审修复：原裸赋值 currentRootPath=p 无 bus 节拍，订阅方感知不到 */
   }, [p]),
     React.useEffect(() => {
       sessionProbe.set(k || null);
@@ -1922,7 +1993,7 @@ function Sidebar(t) {
       Me && i.trim()
         ? ne.filter(
             (n) =>
-              (n.branch || shortPath(n.path))
+              (n.branch || shortenPath(n.path))
                 .toLowerCase()
                 .indexOf(i.trim().toLowerCase()) >= 0,
           )
@@ -1932,45 +2003,27 @@ function Sidebar(t) {
     (We = e(
       "div",
       { className: "pw-drop" },
-      Ee
-        ? e(
-            "div",
-            { className: "pw-drop-filter" },
-            e("input", {
-              className: "pw-input",
-              value: j,
-              placeholder: "过滤项目…",
-              onChange: (n) => z(n.target.value),
-            }),
-          )
-        : null,
+      Ee ? dropFilterEl(j, "过滤项目…", z) : null,
       e(
         "div",
         { className: "pw-drop-list" },
         je.map((n) =>
-          e(
-            "button",
-            {
-              key: n.root,
-              className:
-                "pw-drop-row" +
-                (canonPath(n.root) === canonPath(M) ? " cur" : ""),
-              title: n.root,
-              onClick: () => $e(n.root),
-            },
-            e(
-              "span",
-              { className: "pw-check" },
-              canonPath(n.root) === canonPath(M) ? "✓" : "",
-            ),
-            e("span", { className: "pw-mono" }, shortPath(n.root)),
-            n.running > 0
-              ? e("span", { className: "pw-act run" }, "● " + n.running)
-              : null,
-            n.pending > 0
-              ? e("span", { className: "pw-act warn" }, "● " + n.pending)
-              : null,
-          ),
+          dropRowEl({
+            k: n.root,
+            cur: canonPath(n.root) === canonPath(M),
+            title: n.root,
+            onClick: () => $e(n.root),
+            label: shortenPath(n.root),
+            /* 活动徽标经 extra 注入（数组子节点补 key，原为静态子参数无需 key） */
+            extra: [
+              n.running > 0
+                ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
+                : null,
+              n.pending > 0
+                ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
+                : null,
+            ],
+          }),
         ),
         je.length === 0
           ? e("div", { className: "pw-hint" }, "没有匹配的项目")
@@ -2010,23 +2063,16 @@ function Sidebar(t) {
           : e(
               "div",
               { key: d.path, className: "pw-wt-row" },
-              e(
-                "button",
-                {
-                  className: "pw-drop-row" + (W ? " cur" : ""),
-                  title: d.path,
-                  onClick: () => Ge(d.path),
-                },
-                e("span", { className: "pw-check" }, W ? "✓" : ""),
-                e(
-                  "span",
-                  { className: "pw-mono" },
-                  d.branch || shortPath(d.path),
-                ),
-                d.isMain
+              dropRowEl({
+                k: d.path,
+                cur: W,
+                title: d.path,
+                onClick: () => Ge(d.path),
+                label: d.branch || shortenPath(d.path),
+                extra: d.isMain
                   ? e("span", { className: "pw-main-badge" }, "主分支")
                   : null,
-              ),
+              }),
               d.isMain
                 ? null
                 : e(
@@ -2096,18 +2142,7 @@ function Sidebar(t) {
     Oe = e(
       "div",
       { className: "pw-drop" },
-      Me
-        ? e(
-            "div",
-            { className: "pw-drop-filter" },
-            e("input", {
-              className: "pw-input",
-              value: i,
-              placeholder: "过滤 worktree…",
-              onChange: (d) => N(d.target.value),
-            }),
-          )
-        : null,
+      Me ? dropFilterEl(i, "过滤 worktree…", N) : null,
       e(
         "div",
         { className: "pw-drop-list sm" },
@@ -2211,7 +2246,7 @@ function Sidebar(t) {
           {
             className: "pw-new-btn",
             disabled: !p,
-            title: p ? "在 " + shortPath(p) + " 新建会话" : "先选择项目",
+            title: p ? "在 " + shortenPath(p) + " 新建会话" : "先选择项目",
             onClick: () => _e(p),
           },
           "＋ 新建",
@@ -2253,7 +2288,7 @@ function Sidebar(t) {
             "span",
             { className: "pw-mono" + (M ? " pw-tail" : " dim") },
             /* LRM 前缀：RTL 截断下保住 ~/ 等前导中性字符的显示顺序 */
-            M ? "\u200e" + shortPath(M) : "选择项目…",
+            M ? "\u200e" + shortenPath(M) : "选择项目…",
           ),
           aRun + aPend > 0
             ? e(
@@ -2280,9 +2315,7 @@ function Sidebar(t) {
               )
             : null,
         ),
-        E
-          ? e("div", { className: "pw-drop-overlay", onClick: () => D(!1) })
-          : null,
+        E ? dropOverlayEl(() => D(!1)) : null,
         We,
       ),
       J
@@ -2306,7 +2339,7 @@ function Sidebar(t) {
               e(
                 "span",
                 { className: "pw-mono" },
-                G ? G.branch || shortPath(G.path) : "…",
+                G ? G.branch || shortenPath(G.path) : "…",
               ),
               G && G.isMain
                 ? e("span", { className: "pw-main-badge" }, "主分支")
@@ -2316,9 +2349,7 @@ function Sidebar(t) {
                 : null,
               e("span", { className: "pw-chev" }, "▾"),
             ),
-            B
-              ? e("div", { className: "pw-drop-overlay", onClick: () => _(!1) })
-              : null,
+            B ? dropOverlayEl(() => _(!1)) : null,
             Oe,
           )
         : null,
@@ -2870,23 +2901,24 @@ function Details(t) {
       e(ImgZoomView, null),
   );
 }
-var mdBaseDir = "";
+/* 评审修复：模块级 var mdBaseDir 已删——基目录改由 renderMarkdown 经 bd 显式传入
+ *（原渲染期写共享态；resolveLocalPath/mediaUrl 第二参即 bd，缺省 "" 与原空值同义） */
 function isExternalHref(s) {
   return /^(https?:|mailto:|#|data:)/i.test(String(s || ""));
 }
-function resolveLocalPath(s) {
+function resolveLocalPath(s, bd) {
   s = String(s || "").trim();
   if (!s || isExternalHref(s)) return null;
   s = s.replace(/^\.\//, "");
   if (s.slice(0, 2) === "~/") return s;
   if (s.charAt(0) !== "/") {
-    if (!mdBaseDir) return null;
-    s = mdBaseDir + "/" + s;
+    if (!bd) return null;
+    s = bd + "/" + s;
   }
   return s;
 }
-function mediaUrl(s) {
-  const p = resolveLocalPath(s);
+function mediaUrl(s, bd) {
+  const p = resolveLocalPath(s, bd);
   return p ? API + "/wb/raw?path=" + encodeURIComponent(p) : s;
 }
 function openLocalPath(p) {
@@ -2909,6 +2941,11 @@ function PreviewDrawer(t) {
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   const st = usePreviewState(sessionProbe.sid);
   const [hiddenFor, setHiddenFor] = React.useState(null);
+  /* 评审修复：遮罩 dismiss 只压"这一次打开"——文件关掉（activeFile 空）即复位 hiddenFor，
+   * 重开同一文件抽屉能再出场（原版永不重置，同路径关闭再开也被永久压制，无挽回路径） */
+  React.useEffect(() => {
+    !st.activeFile && hiddenFor && setHiddenFor(null);
+  }, [st.activeFile, hiddenFor]);
   /* 宽屏下官方 details 栏是否可用：镜像 ui-layout AppFrame 的 detailsSession 门
    * ——有当前会话且 blank===false 才给列宽，否则钳 0（新建空白会话/无会话时
    * openDetails 只恢复宽度偏好，拗不过该钳制，预览被压进 0 宽列不可见）。
@@ -2936,7 +2973,8 @@ function PreviewDrawer(t) {
       "div",
       { className: "pw-drawer-wrap" },
       e(Details, {
-        sessionId: sessionProbe.sid,
+        /* 评审修复：删掉 sessionId 死 prop——Details 只读 sessionProbe.sid，从不消费该 prop。
+         *（16-apply 的 PanelHost 仍保留 sessionId：那是 dshDetailsPanels 三方驱动的服务面，非 Details 私有） */
         layout: t.layout,
         workspacesSvc: t.workspacesSvc,
         mentionBridge: t.mentionBridge,
@@ -3130,9 +3168,14 @@ class AcpClient {
     const u = new URL("/__dsh-geek-sidebar__/wb/acp-ws", location.origin);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.search = new URLSearchParams({ agent: "kimi", session: this.tabId, cwd: this.cwd }).toString();
+    /* 评审修复：socket 代际号——重连/手动 reconnect 后，旧 socket 晚到的 onmessage/onclose
+     * 不得写新连接的状态（旧版无守卫：旧 close 会把新态误置 dead 并多排一次退避，双连接
+     * 并存时 replay/update 还会交错进同一份 items） */
+    const gen = (this._gen = (this._gen || 0) + 1);
     const ws = new WebSocket(u.toString());
     this.ws = ws;
     ws.onmessage = (ev) => {
+      if (gen !== this._gen) return;
       let msg;
       try {
         msg = JSON.parse(ev.data);
@@ -3235,6 +3278,7 @@ class AcpClient {
       this.fire();
     };
     ws.onclose = (ev) => {
+      if (gen !== this._gen) return;
       if (ev.code === 1011 && ev.reason) this.fatal = ev.reason;
       this._clearCompacting();
       if (!this.intentionalClose) {
@@ -3430,6 +3474,7 @@ class AcpClient {
   }
   close() {
     this.intentionalClose = true;
+    this._gen = (this._gen || 0) + 1; /* 评审修复：close 后晚到帧一并作废（同代际守卫） */
     if (this._rcTimer) {
       clearTimeout(this._rcTimer);
       this._rcTimer = 0;
@@ -3530,7 +3575,9 @@ function AgentTabView({ client }) {
   const [draft, setDraft] = React.useState("");
   const [images, setImages] = React.useState([]); /* {url,data,mimeType}，最多 4 张 */
   const [histOpen, setHistOpen] = React.useState(false);
-  const [delId, setDelId] = React.useState(null); /* 历史行删除的两击确认态 */
+  /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id=sessionId，适配器保持原签名） */
+  const cf = useTwoClick();
+  const delId = cf[0], setDelId = (id) => (id == null ? cf[2]() : cf[1](id));
   const [slashIdx, setSlashIdx] = React.useState(0);
   const [slashOff, setSlashOff] = React.useState(false); /* Esc 关闭补全弹窗，继续输入自动复位 */
   const [usageOpen, setUsageOpen] = React.useState(false); /* 上下文用量浮层 */
@@ -4187,9 +4234,32 @@ function TerminalView() {
     });
     ro.observe(host);
     connect();
+    /* 评审修复：bus 节拍上比对连接参数键（sid|root），变化即平推重连——原版 wsUrl 的
+     * sessionId/cwd 在建连时捕获，切换会话/项目后终端仍挂旧绑定。root 经 01 的
+     * setCurrentRootPath 发节拍，sid 经 sessionProbe.set 发节拍，两处都能捕到。
+     * 平推不算失败：置空 onclose 不走退避，xterm 保留 scrollback 仅换 pty 绑定 */
+    let lastKey = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
+    const paramSub = bus.sub(() => {
+      if (closed) return;
+      const k2 = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
+      if (k2 === lastKey) return;
+      lastKey = k2;
+      failures = 0;
+      clearTimeout(retryTimer);
+      try {
+        if (socket) {
+          socket.onclose = null;
+          socket.close();
+        }
+      } catch (e9) {}
+      connect();
+    });
     return () => {
       closed = true;
       clearTimeout(retryTimer);
+      try {
+        paramSub();
+      } catch (e9) {}
       try {
         ro.disconnect();
       } catch (e4) {}
@@ -4257,7 +4327,20 @@ function BottomPanel(t) {
     if (!col) return undefined;
     if (!col.style.transition) col.style.transition = "padding-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
     col.style.paddingBottom = bottomPanel.open && !yielded ? bottomPanel.height + "px" : "0px";
+    /* 评审修复：卸载（插件热更）/依赖轮换时归零，别让挤压 padding 残留在平台列上 */
+    return () => {
+      col.style.paddingBottom = "0px";
+    };
   }, [bottomPanel.open, bottomPanel.height, yielded]);
+  /* 评审修复：拖拽中的 document 监听登记到 ref，面板卸载（让位/热更）时兜底摘除——
+   * 原只在 mouseup 才摘，拖拽中卸载会永久泄漏一对监听器。hooks 须在上方 early return 之前 */
+  const dragOff = React.useRef(null);
+  React.useEffect(
+    () => () => {
+      dragOff.current && dragOff.current();
+    },
+    [],
+  );
   if (!mounted || !rect || yielded) return null;
   const startDrag = (ev) => {
     ev.preventDefault();
@@ -4268,11 +4351,15 @@ function BottomPanel(t) {
       bottomPanel.set({ height: h });
     };
     const up = () => {
-      document.removeEventListener("mousemove", mv);
-      document.removeEventListener("mouseup", up);
+      dragOff.current && dragOff.current();
       try {
         window.localStorage.setItem("pw-bpanel-h", String(bottomPanel.height));
       } catch (e9) {}
+    };
+    dragOff.current = () => {
+      (document.removeEventListener("mousemove", mv),
+        document.removeEventListener("mouseup", up),
+        (dragOff.current = null));
     };
     document.addEventListener("mousemove", mv);
     document.addEventListener("mouseup", up);

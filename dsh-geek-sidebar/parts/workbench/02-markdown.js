@@ -1,5 +1,7 @@
 const isMd = (t) => /\.(md|markdown)$/i.test(t);
-function mdInline(t) {
+/* 评审修复：bd（链接/图片解析基目录）显式传参——原经 12-mdpath 的模块级
+ * var mdBaseDir 隐式传递，渲染期写共享态（并发/顺序敏感）。行为逐点保持 */
+function mdInline(t, bd) {
   const e = [],
     s =
       /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`]+`|!\[[^\]]*\]\([^)]*\)|\[[^\]]+\]\([^)]*\))/g;
@@ -26,11 +28,11 @@ function mdInline(t) {
       e.push(
         React.createElement("img", {
           key: l++,
-          src: mediaUrl(u[2]),
+          src: mediaUrl(u[2], bd),
           alt: u[1],
           style: { maxWidth: "100%" },
           onClick: (g) => {
-            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2])));
+            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2], bd)));
           },
           onError: (g) => {
             const t = g.currentTarget;
@@ -53,7 +55,7 @@ function mdInline(t) {
             target: "_blank",
             rel: "noreferrer",
             onClick: (g) => {
-              const p = resolveLocalPath(u[2]);
+              const p = resolveLocalPath(u[2], bd);
               p && (g.preventDefault(), openLocalPath(p));
             },
           },
@@ -66,7 +68,7 @@ function mdInline(t) {
   return (o < t.length && e.push(t.slice(o)), e);
 }
 function renderMarkdown(t, e, bd) {
-  mdBaseDir = typeof bd == "string" ? bd : "";
+  bd = typeof bd == "string" ? bd : "";
   const s = String(t).replace(
       /\r\n/g,
       `
@@ -118,7 +120,7 @@ function renderMarkdown(t, e, bd) {
             e[g] = y;
           }));
       }
-      (o.push(c("h" + m[1].length, h, mdInline(m[2]))), a++);
+      (o.push(c("h" + m[1].length, h, mdInline(m[2], bd))), a++);
       continue;
     }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(r)) {
@@ -133,7 +135,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "blockquote",
           { key: l++, className: "pw-quote" },
-          mdInline(h.join(" ")),
+          mdInline(h.join(" "), bd),
         ),
       );
       continue;
@@ -164,7 +166,7 @@ function renderMarkdown(t, e, bd) {
             c(
               "tr",
               null,
-              g.map((x, p) => c("th", { key: p }, mdInline(x))),
+              g.map((x, p) => c("th", { key: p }, mdInline(x, bd))),
             ),
           ),
           c(
@@ -174,7 +176,7 @@ function renderMarkdown(t, e, bd) {
               c(
                 "tr",
                 { key: p },
-                x.map((C, I) => c("td", { key: I }, mdInline(C))),
+                x.map((C, I) => c("td", { key: I }, mdInline(C, bd))),
               ),
             ),
           ),
@@ -190,7 +192,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "ul",
           { key: l++, className: "pw-list" },
-          h.map((g, y) => c("li", { key: y }, mdInline(g))),
+          h.map((g, y) => c("li", { key: y }, mdInline(g, bd))),
         ),
       );
       continue;
@@ -203,7 +205,7 @@ function renderMarkdown(t, e, bd) {
         c(
           "ol",
           { key: l++, className: "pw-list" },
-          h.map((g, y) => c("li", { key: y }, mdInline(g))),
+          h.map((g, y) => c("li", { key: y }, mdInline(g, bd))),
         ),
       );
       continue;
@@ -223,7 +225,7 @@ function renderMarkdown(t, e, bd) {
         break;
       (k.push(h), a++);
     }
-    o.push(c("p", { key: l++, className: "pw-p" }, mdInline(k.join(" "))));
+    o.push(c("p", { key: l++, className: "pw-p" }, mdInline(k.join(" "), bd)));
   }
   return o;
 }

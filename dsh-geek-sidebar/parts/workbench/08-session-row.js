@@ -10,9 +10,9 @@ function SessionRow(t) {
     m = React.useState(""),
     k = m[0],
     h = m[1],
-    g = React.useState(!1),
-    y = g[0],
-    x = g[1],
+    g = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id 用常量 1） */
+    y = g[0] === 1,
+    x = (v) => (v ? g[1](1) : g[2]()),
     p = React.useState(!1),
     C = p[0],
     I = p[1],

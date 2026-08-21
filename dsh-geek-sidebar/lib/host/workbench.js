@@ -146,9 +146,22 @@ export function workbenchApi(ctx, cfg) {
   /* ---------- git 信息（缓存 TTL 可配，默认 60s） ---------- */
   const gitCache = new Map()
   const TTL = C.gitCacheTtlSec * 1000
+  /* 评审修复：缓存加 LRU 上限——key 是客户端任意 cwd 字符串，原先 TTL 只挡命中
+   * 不淘汰条目，Map 无界增长（客户端可控的慢速内存泄漏） */
+  const GIT_CACHE_MAX = 200
+  const gitCacheSet = (k, v) => {
+    gitCache.delete(k)
+    gitCache.set(k, v)
+    while (gitCache.size > GIT_CACHE_MAX) gitCache.delete(gitCache.keys().next().value)
+  }
   async function gitInfo(p) {
     const hit = gitCache.get(p)
-    if (hit && hit.expiresAt > Date.now()) return hit.info
+    if (hit && hit.expiresAt > Date.now()) {
+      /* LRU：命中刷新到新近位置 */
+      gitCache.delete(p)
+      gitCache.set(p, hit)
+      return hit.info
+    }
     let info
     try {
       if (!(await exists(p))) {
@@ -175,7 +188,7 @@ export function workbenchApi(ctx, cfg) {
     } catch {
       info = { root: p, branch: null, isWorktree: false, isTopLevel: false, isGit: false }
     }
-    gitCache.set(p, { info, expiresAt: Date.now() + TTL })
+    gitCacheSet(p, { info, expiresAt: Date.now() + TTL })
     return info
   }
 
@@ -424,8 +437,12 @@ export function workbenchApi(ctx, cfg) {
         /* node 兜底（fs 服务失败时）：不再依赖 base64/head 等 unix 命令 */
         try {
           if (isImg || isPdf) {
+            /* 评审修复：先 stat 预检再读盘——原先整文件读入内存才查 base64 长度
+             * （大文件先撑内存才拒绝）；上限对齐主路 /wb/raw 的 rawMaxMB（主路
+             * 给的 rawUrl 也是这个天花板），统一两条路的上限语义 */
+            const st3 = statSync(p)
+            if (st3.size > C.rawMaxMB * 1024 * 1024) return { error: 'file too large (>' + C.rawMaxMB + 'MB)' }
             const b64 = readFileSync(p).toString('base64')
-            if (b64.length > 8 * 1024 * 1024) return { error: 'file too large (>6MB)' }
             const mime = isPdf ? 'application/pdf' : mimeOf(lower)
             return { kind: isPdf ? 'pdf' : 'image', url: 'data:' + mime + ';base64,' + b64 }
           }

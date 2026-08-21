@@ -130,6 +130,14 @@ try {
   const rsmall = await shellRoutes['POST /wb/readFile']({ body: { path: join(dir, 'smoke-a.txt') } })
   ok('readFile 兜底小文件不截断', rsmall.kind === 'text' && rsmall.truncated === false)
 
+  /* 图片/pdf 兜底（评审修复回归防线）：小图出 data URL；超限先 stat 预检拒绝，
+   * 上限对齐主路 /wb/raw 的 rawMaxMB（默认 20MB），不再整文件读入后才查 */
+  const rfb = await shellRoutes['POST /wb/readFile']({ body: { path: join(dir, 'smoke-c.png') } })
+  ok('readFile 兜底图片出 data URL', rfb.kind === 'image' && typeof rfb.url === 'string' && rfb.url.indexOf('data:image/png;base64,') === 0)
+  writeFileSync(join(dir, 'smoke-huge.png'), Buffer.alloc(21 * 1024 * 1024, 7))
+  const rfh = await shellRoutes['POST /wb/readFile']({ body: { path: join(dir, 'smoke-huge.png') } })
+  ok('readFile 兜底超限预检拒绝（rawMaxMB）', typeof rfh.error === 'string' && rfh.error.indexOf('20MB') >= 0)
+
   const wf = await routes['POST /wb/writeFile']({ body: { path: join(dir, 'smoke-a.txt'), text: 'rewritten' } })
   ok('writeFile 写盘', wf.ok === true && readFileSync(join(dir, 'smoke-a.txt'), 'utf8') === 'rewritten')
   ok('writeFile 拒目录', (await thrownStatus(() => routes['POST /wb/writeFile']({ body: { path: dir, text: 'x' } }))) === 400)
@@ -194,6 +202,35 @@ try {
     ok('terminal pty 往返', false, String(e && e.message ? e.message : e))
   }
 
+  /* 全局 PTY 总上限（评审修复回归防线）：per-session 配额按客户端自报 sessionId
+   * 计数可被随机 sessionId 绕过；maxTotal=3 时第 4 个不同会话必须被拒 */
+  try {
+    const { createTerminalManager } = await import(new URL('../lib/host/terminal.js', import.meta.url))
+    const mgr2 = createTerminalManager(2, 3)
+    mgr2.open('gs1', 't1', dir, 80, 24)
+    mgr2.open('gs2', 't1', dir, 80, 24)
+    mgr2.open('gs3', 't1', dir, 80, 24)
+    let rejected = false
+    try {
+      mgr2.open('gs4', 't1', dir, 80, 24)
+    } catch (e) {
+      rejected = /global limit/.test(String((e && e.message) || e))
+    }
+    mgr2.disposeAll()
+    ok('terminal 全局总上限拒绝超额', rejected)
+  } catch (e) {
+    ok('terminal 全局总上限拒绝超额', false, String(e && e.message ? e.message : e))
+  }
+
+  /* 共享宿主解析模块（评审修复：terminal/acp 的 makeRequire 收敛到 host-require.js） */
+  try {
+    const { makeRequire } = await import(new URL('../lib/host/host-require.js', import.meta.url))
+    const wsmod = makeRequire()('ws')
+    ok('host-require 解析 ws', !!(wsmod && wsmod.WebSocketServer))
+  } catch (e) {
+    ok('host-require 解析 ws', false, String(e && e.message ? e.message : e))
+  }
+
   /* ---------- ACP 握手 + 会话管理 RPC：spawn kimi acp → initialize → session/new → list/mode/config → 回收 ---------- */
   try {
     const { createAcpManager } = await import(new URL('../lib/host/acp.js', import.meta.url))
@@ -203,6 +240,15 @@ try {
     const h = await mgr.attach('kimi', key, dir, fakeWs)
     ok('acp 握手（kimi initialize+session/new）', typeof h.sessionId === 'string' && h.sessionId.length > 0)
     ok('acp hello 带 modes/configOptions', !!(h.modes && h.modes.availableModes && h.modes.availableModes.length) && Array.isArray(h.configOptions))
+    /* 未知 agent→client 请求回 method-not-found（评审修复回归防线）：
+     * 暂换 send 捕获出口帧，不打扰真实 kimi 进程；通知（无 id）必须维持静默 */
+    const origSend = h.send.bind(h)
+    const captured = []
+    h.send = (o) => captured.push(o)
+    h.onLine(JSON.stringify({ jsonrpc: '2.0', id: 999001, method: 'workspace/unknown_thing', params: {} }))
+    h.onLine(JSON.stringify({ jsonrpc: '2.0', method: 'session/unknown_notice', params: {} }))
+    h.send = origSend
+    ok('acp 未知 agent 请求回 method-not-found', captured.length === 1 && captured[0].id === 999001 && captured[0].error && captured[0].error.code === -32601)
     const lst = await h.rpc('session/list', {})
     ok('acp session/list 返回数组', lst && Array.isArray(lst.sessions))
     await h.rpc('session/set_mode', { sessionId: h.sessionId, modeId: 'plan' })
@@ -228,6 +274,9 @@ try {
   ok('md 外链新标签', findAll(md, (n) => n.type === 'a' && n.props.target === '_blank').length >= 1)
   ok('md 本地图片经 mediaUrl', findAll(md, (n) => n.type === 'img' && String(n.props.src).indexOf('/wb/raw') >= 0).length === 1)
   ok('md 图片可点击放大', findAll(md, (n) => n.type === 'img' && typeof n.props.onClick === 'function').length === 1)
+  /* 评审修复 #2 回归：基目录只经 bd 参数生效——空 bd 时本地图片不走 /wb/raw、原样直出 */
+  const mdNoBase = M.renderMarkdown('![图](pic.png)', [], '')
+  ok('md 空基目录图片原样直出（显式 bd，无隐式全局）', findAll(mdNoBase, (n) => n.type === 'img' && n.props.src === 'pic.png').length === 1)
 
   const C7 = loadPart(['07-code-csv.js'], ['highlightCode', 'parseCsv'])
   ok('highlightCode 关键词标记', findAll(C7.highlightCode('const x = 1', 'js'), (n) => n.type === 'span' && n.props.className === 'pw-tok-k').length >= 1)
@@ -240,7 +289,7 @@ try {
   ok('css 内容列与主对话同宽（748 居中变量）', /--acp-col-pad:max\(12px, calc\(\(100% - 748px\) \/ 2\)\)/.test(cssText) && cssText.indexOf('padding:8px var(--acp-col-pad)') >= 0)
 
   /* store 工厂行为等价（③ 重构的唯一直接证明）：fire 语义与"不变不刷"规则 */
-  const S = new Function('React', readFileSync(new URL('./workbench/01-stores.js', import.meta.url), 'utf8') + '\nreturn { bus, viewStore, notesStore, filesTabStore }')(fakeReact)
+  const S = new Function('React', readFileSync(new URL('./workbench/01-stores.js', import.meta.url), 'utf8') + '\nreturn { bus, viewStore, notesStore, filesTabStore, store }')(fakeReact)
   let fires = 0
   S.bus.sub(() => fires++)
   S.viewStore.set('main')
@@ -251,9 +300,31 @@ try {
   ok('filesTabStore.set(同值) 不触发', fires === 2)
   S.filesTabStore.set('notes')
   ok('filesTabStore.set(异值) 触发', fires === 3 && S.filesTabStore.tab === 'notes')
+  /* 桶 LRU（评审修复 #3）：上限 50，最旧空桶先淘；有文件的桶豁免一轮；触及提新 */
+  S.store.bucket('cap0').files = [{ path: '/x.md', name: 'x.md' }]
+  for (let i = 1; i <= 50; i++) S.store.bucket('cap' + i)
+  ok('store 桶上限 50 且空桶先淘', Object.keys(S.store.buckets).length === 50 && !!S.store.buckets.cap0 && !S.store.buckets.cap1)
+  S.store.bucket('cap2') /* 触及提新 */
+  S.store.bucket('cap51')
+  ok('store 桶 LRU 触及提新', Object.keys(S.store.buckets).length === 50 && !!S.store.buckets.cap2 && !S.store.buckets.cap3)
 
   const I5 = loadPart(['05-icons.js', '14-boticons.js'], ['LayersIcon', 'BotIcon'])
   ok('BotIcon/LayersIcon 结构', findAll(I5.BotIcon(12), (n) => n.type === 'path').length === 6 && findAll(I5.LayersIcon(12), (n) => n.type === 'path').length === 3)
+
+  /* 共享 helper（评审修复 #6 收敛物）：下拉三件套结构 + 两击确认状态机 */
+  const H6 = loadPart(['06-misc.js'], ['useTwoClick', 'dropOverlayEl', 'dropFilterEl', 'dropRowEl'])
+  const dr = H6.dropRowEl({ k: 'r1', cur: true, title: '/t', onClick() {}, label: 'lab' })
+  ok('ui 共享下拉行结构（cur/✓/label）', dr.type === 'button' && dr.props.className === 'pw-drop-row cur' && dr.props.title === '/t' && findAll(dr, (n) => n.props.className === 'pw-check' && n.children[0] === '✓').length === 1 && findAll(dr, (n) => n.props.className === 'pw-mono' && n.children[0] === 'lab').length === 1)
+  ok('ui 共享下拉遮罩/过滤框', H6.dropOverlayEl(() => {}).props.className === 'pw-drop-overlay' && findAll(H6.dropFilterEl('v', 'ph', () => {}), (n) => n.type === 'input' && n.props.value === 'v' && n.props.placeholder === 'ph').length === 1)
+  uiStateQueue = ['armed-id']
+  const tc = H6.useTwoClick()
+  ok('ui 两击确认状态机（armed/ask/cancel）', tc[0] === 'armed-id' && typeof tc[1] === 'function' && typeof tc[2] === 'function')
+  uiStateQueue = null
+  /* 去重依赖守卫（评审修复 #7）：03/09 的 shortenPath 经作用域链取 skills.js 的提升
+   * 声明——skills.js 侧改名/删除时 03/09 运行期才炸，此处静态兜底。
+   *（PencilIcon 刻意未收敛：skills 版 11px 固定 vs workbench 13px，见 05-icons 注释） */
+  const skillsSrc = readFileSync(new URL('./skills.js', import.meta.url), 'utf8')
+  ok('ui skills.js 仍提供共享 shortenPath', /function shortenPath\(/.test(skillsSrc))
 
   /* ---------- ACP 智能体 UI 无头驱动：FootBar/acpTabs/AgentTabView/BottomPanel 渲染期回归防线 ----------
    * 教训来源：slashOff state 漏声明导致 AgentTabView ReferenceError、面板整体呼不出；
@@ -265,9 +336,10 @@ try {
       send(d) { this.sent.push(JSON.parse(String(d))) }
       close() {}
     }
-    /* 02-markdown（agent 正文渲染）依赖 12-mdpath 的 mediaUrl/mdBaseDir 与 00-header 的 API——
-     * 与真实 bundle 的全件拼接对齐，缺件会让渲染期 ReferenceError */
-    const uiSrc = ['00-header.js', '01-stores.js', '12-mdpath.js', '02-markdown.js', '07-code-csv.js', '05-icons.js', '14-boticons.js', '04-footbar.js', '15-acp.js', '15-bottom-panel.js']
+    /* 02-markdown（agent 正文渲染）依赖 12-mdpath 的 mediaUrl（评审修复后基目录改显式 bd 传参）
+     * 与 00-header 的 API；06-misc 供 useTwoClick/sessionProbe——与真实 bundle 的全件拼接对齐，
+     * 缺件会让渲染期 ReferenceError */
+    const uiSrc = ['00-header.js', '01-stores.js', '06-misc.js', '12-mdpath.js', '02-markdown.js', '07-code-csv.js', '05-icons.js', '14-boticons.js', '04-footbar.js', '15-acp.js', '15-bottom-panel.js']
       .map((f) => readFileSync(new URL('./workbench/' + f, import.meta.url), 'utf8'))
       .join('\n')
     /* window 桩：tab 持久化（pw-acp-tabs）可断言；eval 时存储为空 → 自动恢复零副作用 */
@@ -447,6 +519,12 @@ try {
       ok('ui 重连建立新 WS', wsLog.length === 4)
       wsLog[3].onmessage({ data: JSON.stringify({ type: 'hello', sessionId: 's2', cwd: '/tmp/repro-dir' }) })
       ok('ui 同会话重挂不回捞且补发排队消息', c2.status === 'running' && !wsLog[3].sent.some((f) => f.type === 'list_sessions') && wsLog[3].sent.some((f) => f.type === 'prompt' && f.text === '断线期间的消息') && c2.queue.length === 0)
+      /* socket 代际守卫（评审修复 #1）：重连后旧 socket 的迟到事件不得写新态 */
+      const itemsBefore = c2.items.length
+      wsLog[2].onmessage({ data: JSON.stringify({ type: 'note', message: '旧 socket 的迟到帧' }) })
+      ok('ui 旧 socket 迟到帧被代际守卫丢弃', c2.items.length === itemsBefore && c2.status === 'running')
+      wsLog[2].onclose({ code: 1006 })
+      ok('ui 旧 socket 迟到 close 不置 dead 不排退避', c2.status === 'running' && !c2._rcTimer)
       UI.acpTabs.close(tab2)
     } catch (e) {
       uiErr = String((e && e.stack) || e)

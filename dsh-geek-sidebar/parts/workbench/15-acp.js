@@ -155,9 +155,14 @@ class AcpClient {
     const u = new URL("/__dsh-geek-sidebar__/wb/acp-ws", location.origin);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.search = new URLSearchParams({ agent: "kimi", session: this.tabId, cwd: this.cwd }).toString();
+    /* 评审修复：socket 代际号——重连/手动 reconnect 后，旧 socket 晚到的 onmessage/onclose
+     * 不得写新连接的状态（旧版无守卫：旧 close 会把新态误置 dead 并多排一次退避，双连接
+     * 并存时 replay/update 还会交错进同一份 items） */
+    const gen = (this._gen = (this._gen || 0) + 1);
     const ws = new WebSocket(u.toString());
     this.ws = ws;
     ws.onmessage = (ev) => {
+      if (gen !== this._gen) return;
       let msg;
       try {
         msg = JSON.parse(ev.data);
@@ -260,6 +265,7 @@ class AcpClient {
       this.fire();
     };
     ws.onclose = (ev) => {
+      if (gen !== this._gen) return;
       if (ev.code === 1011 && ev.reason) this.fatal = ev.reason;
       this._clearCompacting();
       if (!this.intentionalClose) {
@@ -455,6 +461,7 @@ class AcpClient {
   }
   close() {
     this.intentionalClose = true;
+    this._gen = (this._gen || 0) + 1; /* 评审修复：close 后晚到帧一并作废（同代际守卫） */
     if (this._rcTimer) {
       clearTimeout(this._rcTimer);
       this._rcTimer = 0;
@@ -555,7 +562,9 @@ function AgentTabView({ client }) {
   const [draft, setDraft] = React.useState("");
   const [images, setImages] = React.useState([]); /* {url,data,mimeType}，最多 4 张 */
   const [histOpen, setHistOpen] = React.useState(false);
-  const [delId, setDelId] = React.useState(null); /* 历史行删除的两击确认态 */
+  /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id=sessionId，适配器保持原签名） */
+  const cf = useTwoClick();
+  const delId = cf[0], setDelId = (id) => (id == null ? cf[2]() : cf[1](id));
   const [slashIdx, setSlashIdx] = React.useState(0);
   const [slashOff, setSlashOff] = React.useState(false); /* Esc 关闭补全弹窗，继续输入自动复位 */
   const [usageOpen, setUsageOpen] = React.useState(false); /* 上下文用量浮层 */

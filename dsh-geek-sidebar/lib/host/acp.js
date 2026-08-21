@@ -23,30 +23,15 @@
  * 所以 attach 走后台 promise，握手先完成，hello/replay 就绪后再推。
  */
 import { spawn } from 'node:child_process'
-import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { existsSync } from 'node:fs'
 import { checkOrigin } from './http.js'
+import { makeRequire } from './host-require.js'
 
-function makeRequire() {
-  const candidates = []
-  try { candidates.push(createRequire(process.argv[1] || import.meta.url)) } catch { /* */ }
-  try { candidates.push(createRequire(join(homedir(), '.dsh', 'profiles', 'web', 'package.json'))) } catch { /* */ }
-  try { candidates.push(createRequire('/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json')) } catch { /* */ }
-  return (id) => {
-    let lastErr
-    for (const r of candidates) {
-      try {
-        return r(id)
-      } catch (e) {
-        lastErr = e
-      }
-    }
-    throw lastErr || new Error(id + ' unavailable')
-  }
-}
+/* 评审修复：makeRequire 收敛到共享的 host-require.js（原 acp 版少 import.meta.url
+ * 保底候选，与 terminal.js 行为不一致；解析链注释见 host-require.js） */
 const { WebSocketServer } = makeRequire()('ws')
 
 /* 智能体注册表：目前只接 Kimi Code（其余 ACP agent 需要时再入册）。
@@ -84,9 +69,12 @@ class AcpProcess {
     this.rpcId = 0
     this.turnActive = false /* session/prompt 在途：分级宽限——运行中进程不被 30s 断线定时器杀 */
     this.pendingClose = false /* 运行中收到过关闭请求：轮次结束后由 turnSettled 补数 30s */
+    /* 评审修复：POSIX 下 detached 使子进程成为进程组长，kill() 时整组击杀，
+     * agent 拉起的孙进程（MCP server 等）能一并回收；Windows 无此语义保持默认 */
     this.child = spawn(resolveCmd(agent), agent.args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
       env: { ...process.env },
     })
     const onDead = (err) => {
@@ -147,6 +135,14 @@ class AcpProcess {
       }
       return
     }
+    /* 评审修复：agent 侧发起的未知请求（带 id 带 method）回 JSON-RPC method-not-found——
+     * 原先静默丢弃且永不回响应，agent 端该请求永久挂起（协议演进即死锁）；
+     * 通知（无 id）维持静默 */
+    if (msg.method && msg.id !== undefined) {
+      try {
+        this.send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found: ' + String(msg.method) } })
+      } catch { /* stdin 已走 */ }
+    }
   }
   send(obj) {
     this.child.stdin.write(JSON.stringify(obj) + '\n')
@@ -203,9 +199,17 @@ class AcpProcess {
     this.send({ jsonrpc: '2.0', id: requestId, result: { outcome: { outcome: 'selected', optionId } } })
   }
   kill() {
+    /* 评审修复：杀整个进程组（spawn detached 使子进程成为组长），agent 拉起的
+     * 孙进程（MCP server 等）一并回收；组已不在则退杀直接子进程。
+     * Windows 无 POSIX 进程组语义，维持杀直接子进程 */
     try {
-      this.child.kill('SIGKILL')
-    } catch { /* 已退出 */ }
+      if (process.platform === 'win32') this.child.kill('SIGKILL')
+      else process.kill(-this.child.pid, 'SIGKILL')
+    } catch {
+      try {
+        this.child.kill('SIGKILL')
+      } catch { /* 已退出 */ }
+    }
   }
 }
 
@@ -354,12 +358,16 @@ export function createAcpManager(max) {
  * handler 同步返回，attach 走后台 promise（见文件头说明）。 */
 export function mountAcp(ctx, mgr) {
   const wss = new WebSocketServer({ noServer: true })
-  return ctx.webServer.registerUpgrade({
+  /* 评审修复：跟踪存活连接——Fiber 卸载（dispose）时除撤路由/杀进程外还要断开
+   * 连接，否则客户端挂着连死进程的 socket 直到 TCP 超时 */
+  const live = new Set()
+  const disposeRoute = ctx.webServer.registerUpgrade({
     path: '/__dsh-geek-sidebar__/wb/acp-ws',
     handler: (req, socket, head) => {
       /* 同源护栏（评审修复：WS 是 agent 子进程直通，跨站页面可直发 prompt） */
       if (!checkOrigin(req)) { socket.destroy(); return }
       wss.handleUpgrade(req, socket, head, (ws) => {
+        live.add(ws)
         const url = new URL(req.url || '/', 'http://localhost')
         const q = url.searchParams
         const agentId = String(q.get('agent') || 'kimi')
@@ -504,13 +512,24 @@ export function mountAcp(ctx, mgr) {
         })
         ws.on('close', () => {
           alive = false
+          live.delete(ws)
           mgr.detach(key, ws)
         })
         ws.on('error', () => {
           alive = false
+          live.delete(ws)
           mgr.detach(key, ws)
         })
       })
     },
   })
+  return () => {
+    disposeRoute()
+    for (const ws of live) {
+      try {
+        ws.close(1001, 'dsh-geek-sidebar unloading')
+      } catch { /* 已走 */ }
+    }
+    live.clear()
+  }
 }

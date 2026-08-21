@@ -39,6 +39,9 @@ function ic(t, e) {
     e,
   );
 }
+/* PencilIcon 与 skills.js 的同名图标不算可去重的重复：skills.js 版是 11px 固定尺寸
+ *（技能弹窗专用），本版参数化且两个调用点（08/11）都是 13px——统一需动 skills.js 或
+ * head.js 共享层（评审修复轮均划为禁区），保持各自本体（评审修复 #7 只收敛了 shortPath） */
 function PencilIcon(t) {
   return ic(
     [["p", "M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"]],
