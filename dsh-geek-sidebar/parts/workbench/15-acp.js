@@ -140,12 +140,17 @@ class AcpClient {
     this._fireT = 0;
     this.connect();
   }
-  /* 50ms 节流 fire：流式更新合并成约 20fps 的重渲染 */
-  fire() {
+  /* 50ms 节流 fire：流式更新合并成约 20fps 的重渲染。
+   * hot=true 走 "acp" 频道（评审修复：chunk 不再扇出到侧栏/详情）；同一节流窗口内
+   * 出现非热事件即升级为全局 fire——FootBar 徽标等全局订阅者不会错过状态跳变 */
+  fire(hot) {
+    if (!hot) this._fireGlobal = true;
     if (this._fireT) return;
     this._fireT = setTimeout(() => {
       this._fireT = 0;
-      bus.fire();
+      const g = this._fireGlobal;
+      this._fireGlobal = false;
+      g ? bus.fire() : bus.fire("acp");
     }, 50);
   }
   connect() {
@@ -262,7 +267,11 @@ class AcpClient {
         this._clearCompacting();
         this.items = this.items.concat({ key: this.items.length, kind: "error", text: "进程已退出（code " + msg.code + "）" });
       }
-      this.fire();
+      /* 纯流式增量标 hot 走 "acp" 频道（评审修复）：chunk/usage 是 20fps 源，
+       * 侧栏/详情无需随之重渲染；其余（hello/turn_end/permission/sessions/exit…）
+       * 保持全局 fire——FootBar 徽标与 tab 列表靠状态跳变 */
+      const su = msg.type === "update" && msg.update && msg.update.sessionUpdate;
+      this.fire(su === "agent_message_chunk" || su === "agent_thought_chunk" || su === "usage_update");
     };
     ws.onclose = (ev) => {
       if (gen !== this._gen) return;
@@ -558,7 +567,9 @@ acpRestore();
 function AgentTabView({ client }) {
   const e = React.createElement;
   const [, force] = React.useState(0);
-  React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
+  /* "acp" 频道订阅（评审修复：bus 拆分后唯一需要随流式 chunk 重渲染的视图；
+   * 全局 fire 按语义仍会送达本频道——store/bottomPanel 等稀有事件不丢） */
+  React.useEffect(() => bus.sub(() => force((x) => x + 1), "acp"), []);
   const [draft, setDraft] = React.useState("");
   const [images, setImages] = React.useState([]); /* {url,data,mimeType}，最多 4 张 */
   const [histOpen, setHistOpen] = React.useState(false);

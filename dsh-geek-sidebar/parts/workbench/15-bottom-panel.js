@@ -37,6 +37,25 @@ function termTheme() {
   };
 }
 
+/* xterm 按需加载（评审修复：vendor 284KB 原先拼进 bundle 求值期全量解析，
+ * 与终端惰性策略矛盾）。vendor 从拼接链剥离，host /wb/vendor-xterm.js 直出，
+ * 首开终端才注入 <script>（classic script 顶层 var 挂 window.__pwXterm，同原拼接语义）。
+ * 共享单例 promise：多 tab/重挂载只加载一次；失败可重试（清掉单例） */
+let xtermLoading = null;
+function ensureXterm() {
+  if (window.__pwXterm) return Promise.resolve(true);
+  if (!xtermLoading)
+    xtermLoading = new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = "/__dsh-geek-sidebar__/wb/vendor-xterm.js";
+      s.async = true;
+      s.onload = () => resolve(!!window.__pwXterm);
+      s.onerror = () => ((xtermLoading = null), resolve(false));
+      document.head.appendChild(s);
+    });
+  return xtermLoading;
+}
+
 /* 终端视图：xterm + WS 连接 host pty；断线自动重连（1011+reason 显示错误横幅） */
 function TerminalView() {
   const e = React.createElement;
@@ -45,11 +64,32 @@ function TerminalView() {
   React.useEffect(() => {
     const host = hostRef.current;
     if (!host) return undefined;
-    const XT = window.__pwXterm;
-    if (!XT) {
-      setFatal("xterm 未加载");
-      return undefined;
-    }
+    let dead = false,
+      dispose = null;
+    ensureXterm().then((ok) => {
+      if (dead) return;
+      const XT = window.__pwXterm;
+      if (!ok || !XT) {
+        setFatal("xterm 未加载");
+        return;
+      }
+      dispose = initTerm(host, XT, setFatal);
+    });
+    return () => {
+      ((dead = !0), dispose && dispose());
+    };
+  }, []);
+  return e(
+    "div",
+    { className: "pw-term-wrap" },
+    e("div", { ref: hostRef, className: "pw-term-host" }),
+    fatal ? e("div", { className: "pw-term-fatal" }, fatal) : null,
+  );
+}
+
+/* 终端初始化主体（xterm 就绪后调用）：建 term + WS + 各监听，返回 cleanup */
+function initTerm(host, XT, setFatal) {
+  {
     const term = new XT.Terminal({
       cursorBlink: true,
       fontSize: 12,
@@ -163,13 +203,7 @@ function TerminalView() {
         term.dispose();
       } catch (e8) {}
     };
-  }, []);
-  return e(
-    "div",
-    { className: "pw-term-wrap" },
-    e("div", { ref: hostRef, className: "pw-term-host" }),
-    fatal ? e("div", { className: "pw-term-fatal" }, fatal) : null,
-  );
+  }
 }
 
 /* 面板骨架：tab 栏（智能体 tabs + ＋号接入 → 右端 终端 tab + 关闭钮）+ 内容区。

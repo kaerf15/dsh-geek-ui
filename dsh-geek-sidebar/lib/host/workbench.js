@@ -15,6 +15,8 @@ import { join } from 'node:path'
 import { httpError } from './http.js'
 
 const CSS_URL = new URL('../style.css', import.meta.url)
+const VENDOR_XTERM_URL = new URL('../vendor-xterm.js', import.meta.url)
+let vendorXtermCache = null /* 静态内容读一次缓存（284KB，与 style.css 的每请求读盘不同——vendor 不随开发变动） */
 
 /* ---------- 跨平台（macOS / Windows / Linux） ---------- */
 const IS_WIN = process.platform === 'win32'
@@ -573,6 +575,19 @@ export function workbenchApi(ctx, cfg) {
       }
       res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store' })
       res.end(css)
+    },
+
+    /* ---------- xterm vendor（评审修复：从 client bundle 剥离，首开终端按需注入） ---------- */
+    'GET /wb/vendor-xterm.js': ({ res }) => {
+      if (!vendorXtermCache) {
+        try {
+          vendorXtermCache = readFileSync(VENDOR_XTERM_URL)
+        } catch (e) {
+          throw httpError(500, 'vendor-xterm.js unreadable: ' + msgOf(e))
+        }
+      }
+      res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(vendorXtermCache)
     },
 
     /* ---------- 原始文件流（md 预览的本地图片等资源） ---------- */

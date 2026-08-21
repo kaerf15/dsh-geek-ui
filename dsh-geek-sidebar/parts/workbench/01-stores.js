@@ -53,15 +53,34 @@ const STORE_MAX_BUCKETS = 50,
   },
   bus = {
     fns: [],
-    fire() {
-      for (const t of bus.fns.slice()) t();
+    chans: {},
+    /* 频道语义（评审修复：热路径扇出拆分——原先单 bus，ACP 20fps 流式 chunk 把
+     * 侧栏树/详情 markdown 一起拖着重渲染）：
+     *   fire()    全局 + 全部频道（稀有事件，兼容旧订阅，人人听得到）；
+     *   fire(ch)  仅该频道（热路径专用：只有订阅该频道的视图重渲染） */
+    fire(t) {
+      if (t) {
+        for (const e of (bus.chans[t] || []).slice()) e();
+        return;
+      }
+      for (const e of bus.fns.slice()) e();
+      for (const s in bus.chans) for (const e of bus.chans[s].slice()) e();
     },
-    sub(t) {
+    sub(t, e) {
+      if (!e)
+        return (
+          bus.fns.push(t),
+          () => {
+            const s = bus.fns.indexOf(t);
+            s >= 0 && bus.fns.splice(s, 1);
+          }
+        );
+      const s = bus.chans[e] || (bus.chans[e] = []);
       return (
-        bus.fns.push(t),
+        s.push(t),
         () => {
-          const e = bus.fns.indexOf(t);
-          e >= 0 && bus.fns.splice(e, 1);
+          const i = s.indexOf(t);
+          i >= 0 && s.splice(i, 1);
         }
       );
     },

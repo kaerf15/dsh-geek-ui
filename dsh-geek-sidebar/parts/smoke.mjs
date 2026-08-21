@@ -106,6 +106,11 @@ try {
   await routes['GET /wb/style.css']({ res: resCss })
   ok('style.css 直出', resCss.code === 200 && String(resCss.body).includes('.pw-sidebar'))
 
+  /* xterm vendor 直出（1.19.8 起从 bundle 剥离，首开终端按需注入） */
+  const resVx = mockRes()
+  await routes['GET /wb/vendor-xterm.js']({ res: resVx })
+  ok('vendor-xterm.js 直出', resVx.code === 200 && String(resVx.body).includes('__pwXterm'))
+
   const l1 = await routes['POST /wb/listDir']({ body: { path: dir } })
   ok('listDir(fs 主路)', Array.isArray(l1.entries)
     && l1.entries.some((e) => e.name === 'smoke-a.txt' && e.type === 'file')
