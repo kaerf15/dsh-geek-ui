@@ -39,14 +39,6 @@ DSH Web 极客侧栏：工作台侧栏 + 文件管理器/预览 + 技能管理 +
 - **安全护栏**：HTTP/WS 端点 Origin 同源校验；技能开关/文件写入白名单；PTY/ACP 进程配额
 - **工程**：纯 JS 单文件 client（`parts/` 可读源码按序拼接，`npm run build` 拼接器带构建期断言：顶层 return 居末校验 + 顶层符号重名检查）；host 路由 `/__dsh-geek-sidebar__/{skills,wb}/*` + terminal/acp 两条 WS；`Config` 可调参数（textMaxKB/rawMaxMB/writeMaxMB/notesMaxDirs/gitCacheTtlSec/terminalMaxPerSession/acpMaxSessions）；跨 macOS/Windows/Linux（选择器/回收站/zip/reveal/npx 按平台分支）；`npm test` = `parts/smoke.mjs` 88 项 host + client 断言
 
-## dsh-chat-minimap（v0.1.4 · verifiedWith 0.1.0-rc.8）
-
-长对话的导航地图：会话右缘一排小方块，每个方块是一条你的发言。鼠标悬停即展开整段对话的大纲（哪条是你说的、AI 答了什么），点击方块或标题平滑滚动到对应位置，轨道支持按压拖动快速浏览——几百轮的对话也能秒回上下文。
-
-![minimap](screenshots/minimap.png)
-
-pi-web ChatMinimap 复刻，纯 client 实现（host 为空壳），副作用全部随 React effect 回收。
-
 ---
 
-许可：[MIT](LICENSE)（dsh-geek-sidebar 与 dsh-chat-minimap 部分设计参考自 [pi-web](https://github.com/agegr/pi-web)，同 MIT）
+许可：[MIT](LICENSE)（dsh-geek-sidebar 部分设计参考自 [pi-web](https://github.com/agegr/pi-web)，同 MIT）
