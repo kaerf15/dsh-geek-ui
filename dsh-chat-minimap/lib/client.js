@@ -8,9 +8,15 @@
  * each assistant answer. Clicking a node / answer / heading smooth-scrolls
  * the conversation to that exact spot; the rail supports press-drag scrubbing.
  *
- * Data comes from the session's ConversationSnapshot (chat view nodes); DOM
- * anchoring uses the chat view's own [data-conversation-scroll] scrollport
- * and per-row [data-chat-anchor-key] markers.
+ * Data comes from the uiConversation service's per-session chat target
+ * (`ctx.uiConversation.binding(sessionId).target('chat')` → ChatSnapshot:
+ * order + live per-key node store). DOM anchoring uses the chat view's own
+ * [data-conversation-scroll] scrollport and per-row [data-chat-anchor-key]
+ * markers.
+ *
+ * (alpha.3 port) dsh 0.1.2 moved the ChatSnapshot OFF the session face
+ * snapshot (sessionOf(scope) no longer carries `.chat`): the chat view is
+ * now one target of the ui-conversation assembly, activated on subscribe.
  *
  * Behavior ported from pi-web components/ChatMinimap.tsx (v0.8.8):
  * MAX_NODE_GAP / MINIMAP_PADDING layout, 30% focus-line active node,
@@ -291,11 +297,10 @@ body[data-ds-dark-theme] .dshm-root {
         .trim();
     }
 
-    /** Build turn list from the chat view snapshot: user/steering opens a turn,
+    /** Build turn list from the ChatSnapshot: user/steering opens a turn,
      *  assistant-step text lands in the current turn. ChatSnapshot.nodes is a
      *  live per-key store; render order comes from chat.order. */
-    function buildTurns(snapshot) {
-      const chat = snapshot && snapshot.chat;
+    function buildTurns(chat) {
       const order = chat && Array.isArray(chat.order) ? chat.order : [];
       const store = chat && chat.nodes;
       if (!store || typeof store.get !== 'function') return [];
@@ -316,8 +321,10 @@ body[data-ds-dark-theme] .dshm-root {
           if (md) current.assistants.push({ key: node.key, markdown: md });
         }
       }
-      // Streaming partial answer joins the last turn.
-      const partial = snapshot && snapshot.partial;
+      // Streaming partial answer joins the last turn. The partial lives on
+      // the ChatSnapshot's legacy slice in alpha.3 (was snapshot.partial on
+      // the session face before the ui-conversation split).
+      const partial = chat && chat.legacy ? chat.legacy.partial : null;
       if (partial && current) {
         const md = assistantMarkdown(partial);
         if (md) current.assistants.push({ key: '__partial__', markdown: md });
@@ -470,30 +477,33 @@ body[data-ds-dark-theme] .dshm-root {
 
     function MinimapOverlay(props) {
       const sessions = props.sessions;
+      const uiConversation = props.uiConversation;
 
       const listState = useObservable(sessions.list);
       const sessionId = listState && listState.current;
 
       const [faceRetryTick, setFaceRetryTick] = useState(0);
-      const face = useMemo(() => {
-        if (!sessionId) return undefined;
+      const chatSource = useMemo(() => {
+        if (!sessionId || !uiConversation) return undefined;
         try {
-          const scope = sessions.scope(sessionId);
-          return scope ? sessions.sessionOf(scope) : undefined;
+          // binding() throws for a session the list has not materialized yet;
+          // target('chat') is identity-stable per binding and its first
+          // subscribe activates the chat target (see BoundConversation).
+          return uiConversation.binding(sessionId).target('chat');
         } catch {
           return undefined;
         }
-      }, [sessions, sessionId, faceRetryTick]);
-      // (review fix) Never negatively cache the face lookup: scope() can
-      // throw or come back undefined transiently during a session switch, and
-      // a memoized undefined hid the rail until the next switch. Retry on a
-      // slow timer while unresolved; the effect timer self-clears on success.
+      }, [uiConversation, sessionId, faceRetryTick]);
+      // Never negatively cache the source lookup: binding() throws
+      // transiently during a session switch, and a memoized undefined hid the
+      // rail until the next switch. Retry on a slow timer while unresolved;
+      // the effect timer self-clears on success.
       useEffect(() => {
-        if (face || !sessionId) return undefined;
+        if (chatSource || !sessionId) return undefined;
         const timer = setTimeout(() => setFaceRetryTick((n) => n + 1), FACE_RETRY_MS);
         return () => clearTimeout(timer);
-      }, [face, sessionId]);
-      const snapshot = useObservable(face);
+      }, [chatSource, sessionId]);
+      const snapshot = useObservable(chatSource);
 
       const turns = useMemo(() => buildTurns(snapshot), [snapshot]);
 
@@ -1190,14 +1200,15 @@ body[data-ds-dark-theme] .dshm-root {
     /* ------------------------------------------------------------------ */
 
     exports.name = 'dsh-chat-minimap';
-    exports.inject = ['sessions', 'slots'];
+    exports.inject = ['sessions', 'slots', 'uiConversation'];
     exports.apply = function apply(ctx) {
       const sessions = ctx.sessions;
       const slots = ctx.slots;
+      const uiConversation = ctx.uiConversation;
       const doRegister = () => {
         return slots.register(
           { name: 'shell.overlay', id: 'dsh-chat-minimap' },
-          () => h(MinimapOverlay, { sessions }),
+          () => h(MinimapOverlay, { sessions, uiConversation }),
         );
       };
       if (typeof slots.inject === 'function') {
