@@ -2,7 +2,7 @@ MIT License
 
 Copyright (c) 2026 dsh-plugins contributors
 
-本目录中 dsh-chat-minimap 与 dsh-geek-sidebar 的部分设计参考并派生自
+本目录中 dsh-geek-sidebar 的部分设计参考并派生自
 pi-web（https://github.com/agegr/pi-web），其原始版权声明如下：
 
   Copyright (c) 2026 agegr
