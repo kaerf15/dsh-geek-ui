@@ -5,7 +5,7 @@ return {
     const s = t.get("layout"),
       o = t.get("sessions"),
       a = t.get("workspaces");
-    (mountStyle(API + "/wb/style.css?v=2.1.0&t=" + Date.now()),
+    (mountStyle(API + "/wb/style.css?v=2.0.5&t=" + Date.now()),
       host
         .call("workbench.notesGet", {})
         .then((u) => {

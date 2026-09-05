@@ -7,7 +7,10 @@ function ImgZoomView() {
   React.useEffect(() => {
     if (!src) return undefined;
     const onKey = (ev) => {
-      if (ev.key === "Escape") imgZoomStore.set(null);
+      if (ev.key !== "Escape") return;
+      /* 吃掉 Esc，避免外层（预览缩放 / 便签下栏）同一键一起关 */
+      ev.stopPropagation();
+      imgZoomStore.set(null);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -182,7 +185,9 @@ function Details(t) {
     if (!zoomed) return undefined;
     const onKey = (ev) => {
       /* 图片放大开着时 Esc 归 ImgZoomView，一层一层退；编辑中 Esc 不收面板（edRef 实时读，免 deps 抖动） */
-      if (ev.key === "Escape" && !imgZoomStore.src && !edRef.current) setZoomed(!1);
+      if (ev.key !== "Escape" || imgZoomStore.src || edRef.current) return;
+      ev.stopPropagation();
+      setZoomed(!1);
     };
     document.addEventListener("keydown", onKey);
     /* 窄屏（≤1219px，对齐 13-drawer 断点）让步链派生关栏 + drawer 出场——退缩放让位，防 fixed 面板悬空撞层 */

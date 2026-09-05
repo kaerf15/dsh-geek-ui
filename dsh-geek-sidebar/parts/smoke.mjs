@@ -129,6 +129,28 @@ try {
   const lw = await shellRoutes['POST /wb/listDir']({ body: { path: dir + '/' } })
   ok('listDir 尾分隔符剥除后 parent 一致', lw.path === dir + '/' && lw.parent === l1.parent)
 
+  /* 文件树目录监视：只盯客户端列出的绝对路径，增删抬 stamp；node_modules 不订。 */
+  {
+    const tw = await routes['POST /wb/treeWatch']({ body: { dirs: [dir] } })
+    ok('treeWatch 订阅临时目录', tw.watching === true && (tw.dirs || []).some((p) => p === dir))
+    await new Promise((r) => setTimeout(r, 200))
+    const before = tw.stamp
+    writeFileSync(join(dir, 'watched-new.txt'), 'watch-me', 'utf8')
+    const waited = await routes['POST /wb/treeWait']({ body: { since: before, timeoutMs: 4000 } })
+    ok('treeWait 新增文件抬 stamp', waited.stamp > before)
+    const rel = await routes['POST /wb/treeWatch']({ body: { dirs: ['relative/nope'] } })
+    ok('treeWatch 拒相对路径', (rel.dirs || []).length === 0)
+    const skipNm = await routes['POST /wb/treeWatch']({ body: { dirs: [join(dir, 'node_modules')] } })
+    ok('treeWatch 跳过 node_modules', (skipNm.dirs || []).length === 0)
+    const nowait = await routes['POST /wb/treeWait']({ body: { since: 999999, timeoutMs: 0 } })
+    ok('treeWait timeout 0 立即返回', typeof nowait.stamp === 'number')
+    const offApi = workbenchApi({ get: (n) => (n === 'shell' ? shellShim : n === 'fs' ? fsShim : undefined) }, { treeWatch: false })
+    const off = await offApi['POST /wb/treeWait']({ body: { since: 0, timeoutMs: 8000 } })
+    ok('treeWatch 关闭立即返回 watching:false', off.watching === false)
+    const empty = await routes['POST /wb/treeWatch']({ body: { dirs: [] } })
+    ok('treeWatch 空 dirs 卸监视', (empty.dirs || []).length === 0)
+  }
+
   const rf = await routes['POST /wb/readFile']({ body: { path: join(dir, 'smoke-a.txt') } })
   ok('readFile 文本', rf.kind === 'text' && rf.text === 'hello smoke')
 
@@ -608,6 +630,18 @@ try {
   }
   ok('css DirPicker 样式就位', cssText.indexOf('.pw-dpk-panel') >= 0 && cssText.indexOf('.pw-dpk-ok') >= 0 && cssText.indexOf('.pw-dpk-star') >= 0)
   ok('css 便签样式就位', cssText.indexOf('.pw-qn-bubble') >= 0 && cssText.indexOf('.pw-qn-drawer') >= 0 && cssText.indexOf('.pw-qn-side-item') >= 0)
+  ok('css 便签抽屉相对 overlay 定位（非 fixed 全屏）', /(?:^|\s)\.pw-qn-drawer\s*\{[^}]*position:absolute/.test(cssText))
+  ok('css 预览缩放压过 shell.overlay(20)', /\.pw-zoomview-mask\s*\{[^}]*z-index:21/.test(cssText) && /\.pw-details\.zoomed\s*\{[^}]*z-index:22/.test(cssText))
+  const detailsSrc = readFileSync(new URL('./workbench/11-details.js', import.meta.url), 'utf8')
+  ok('缩放/图片 Esc 阻断冒泡（不连带关便签）', detailsSrc.includes('ev.stopPropagation()') && /setZoomed\(!1\)/.test(detailsSrc))
+  const qnSrc = readFileSync(new URL('./workbench/15-quicknotes.js', import.meta.url), 'utf8')
+  ok('便签定位走中间列而非视口全宽', qnSrc.includes('function qnReadCenterBand') && !qnSrc.includes('width: window.innerWidth'))
+  ok('便签定位不碰构建哈希类 / main 回退', !qnSrc.includes('pI_x6G_centerCol') && !qnSrc.includes('querySelector("main")'))
+  const treeSrc = readFileSync(new URL('./workbench/03-tree.js', import.meta.url), 'utf8')
+  ok('文件树保留手动刷新按钮', treeSrc.includes('title: "刷新"') && treeSrc.includes('treeSilent'))
+  ok('文件树监视驱动不拆空 children', treeSrc.includes('workbench.treeWait') && !/treeSilent[\s\S]*children:\s*\{\}/.test(treeSrc))
+  ok('文件树静默失败不拆已展开目录', /静默重拉失败[\s\S]{0,80}if \(silent\) return/.test(treeSrc))
+  ok('文件树监视卸载有 cleanup', treeSrc.includes('pending') && treeSrc.includes('expandedKey'))
 
   /* ---------- FootBar/store/便签 UI 无头驱动：渲染期回归防线 ----------
    * node --check 只查语法，必须用 fakeReact 真渲染一遍。 */

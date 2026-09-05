@@ -1,5 +1,5 @@
 /**
- * dsh-archive-manager /wb/*：归档会话的「放回对话」与「永久删除」。
+ * dsh-geek-archive /wb/*：归档会话的「放回对话」与「永久删除」。
  *
  * 平台 0.1.2-rc.1 的归档是单向的（installed README：no unarchive action exists yet），
  * 也没有公开的会话删除；放回/删除都经 workspace registry 的 JS 层私有方法
@@ -127,7 +127,7 @@ export function archiveApi(ctx) {
       if (!result.removed) throw httpError(404, 'session not in archive')
       /* 通知 client 会话已移除（api-session/removed Remote 事件；emit 沿 ctx 冒泡到根、由网关转发）。
        * 不解除归档的话，删除后会话会因 byId 残留而在对话列表里复活，故必须同发。 */
-      try { ctx.emit('api-session/removed', id) } catch (e) { console.warn('[dsh-archive-manager] api-session/removed emit failed:', String(e)) }
+      try { ctx.emit('api-session/removed', id) } catch (e) { console.warn('[dsh-geek-archive] api-session/removed emit failed:', String(e)) }
       /* 删除会话落盘目录（session.jsonl.zstd 等）。若会话仍在运行，下次 checkpoint 可能重写目录，
        * 属已知边界：归档中被删除的会话通常已结束。rmSync force 对不存在的目录是 no-op。 */
       rmSync(sessionDirPath(cwd, id), { recursive: true, force: true })

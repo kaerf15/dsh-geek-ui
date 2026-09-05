@@ -834,6 +834,14 @@ function dropTreeSubtree(S, path) {
   for (const F of Object.keys(X)) pathHasPrefix(F, path) && F !== path && delete X[F];
   return OA({}, S, { children: v, expanded: X });
 }
+function treeEntriesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].path !== b[i].path || a[i].type !== b[i].type || a[i].name !== b[i].name)
+      return false;
+  }
+  return true;
+}
 /* 打开文件预览前请右栏当前占用者退场：自家驱动经 panelStore.close() 正常归位；
  * 外来面板（如 GTM 抽屉，打开即注册 details、无外部关闭 API）则点它自带的 × 按钮，
  * 走它自己的清理路径（注销注册 + 关栏 + 复位开态），状态一致。选择器失效时静默退化为不轮换。 */
@@ -1015,32 +1023,39 @@ function FileBrowser(t) {
         })
         .catch(() => {});
     },
-    w = (i, N) => (
-      k((S) => {
-        if (!N && S.children[i]) return S;
-        const v = OA({}, S.loading);
-        return ((v[i] = !0), OA({}, S, { loading: v }));
-      }),
-      host
+    w = (i, N, silent) => {
+      if (!silent) {
+        k((S) => {
+          if (!N && S.children[i]) return S;
+          const v = OA({}, S.loading);
+          return ((v[i] = !0), OA({}, S, { loading: v }));
+        });
+      }
+      return host
         .call("workbench.listDir", { path: i })
         .then((S) => {
           k((v) => {
+            const next = (S && S.entries) || [];
+            if (silent && treeEntriesEqual(v.children[i], next) && !v.loading[i])
+              return v;
             const F = OA({}, v.children),
               X = OA({}, v.loading);
             return (
               delete X[i],
-              (F[i] = (S && S.entries) || []),
+              (F[i] = next),
               OA({}, v, { children: F, loading: X })
             );
           });
         })
         .catch(() => {
+          /* 静默重拉失败保持原树：瞬时网络错误不能把已展开目录拆掉 */
+          if (silent) return;
           k((S) => {
             const v = OA({}, S.loading);
             return (delete v[i], OA({}, S, { loading: v }));
           });
-        })
-    );
+        });
+    };
   React.useEffect(() => {
     l && (w(l), fetchGit(l));
   }, [l]);
@@ -1083,52 +1098,55 @@ function FileBrowser(t) {
           .catch(() => {});
     };
   React.useEffect(() => store.sub(() => k((i) => OA({}, i))), []);
+  const listedDirs = () => {
+    if (!l) return [];
+    const dirs = [l];
+    for (const v of Object.keys(m.expanded)) {
+      if (m.expanded[v] && pathHasPrefix(v, l) && v !== l) dirs.push(v);
+    }
+    return dirs;
+  };
   const B = () => {
       if (g) return;
       (C(!1), y(!0));
-      const i = Object.keys(m.expanded).filter(
-        (v) => m.expanded[v] && l && pathHasPrefix(v, l),
-      );
       k((v) => ({
         expanded: v.expanded,
         children: {},
         loading: {},
         rev: v.rev + 1,
       }));
-      const N = [];
-      l && N.push(w(l, !0));
-      for (const v of i) v !== l && N.push(w(v, !0));
+      const N = listedDirs().map((v) => w(v, !0));
       const S = () => {
         (y(!1), flashDone(C), l && fetchGit(l));
       };
       /* Promise.all([]) 也会正常 resolve，无需对空数组再补一次（旧版 S 会跑两遍，评审 P3） */
       Promise.all(N).then(S, S);
     },
-    /* 焦点自动刷：外部（终端/Finder/agent）文件变动树感知不到，切回页面时静默重拉
-     * 已展开目录。节流 10s 防来回切窗抖动；手动刷新中（g）或面板收起（!c）时跳过。
-     * 手动刷新按钮保留，覆盖节流窗口内"立刻要看"的兜底需求。 */
-    treeAuto = () => {
+    /* 监视/焦点共用：原地重拉已列出目录，不拆空 children。busy 期间再来的事件记 pending，
+     * 本轮结束后补一次，避免 stamp 被吃掉。手动刷新按钮仍走 B()（转圈+对勾）。 */
+    treeSilent = () => {
       const i = treeAutoRef.current;
-      if (i.busy || g || !c || !l || document.visibilityState !== "visible")
+      if (i.busy) {
+        i.pending = !0;
         return;
-      const N = Date.now();
-      if (N - i.at < 1e4) return;
-      ((i.at = N), (i.busy = !0));
-      const S = Object.keys(m.expanded).filter(
-        (v) => m.expanded[v] && pathHasPrefix(v, l),
-      );
-      k((v) => ({
-        expanded: v.expanded,
-        children: {},
-        loading: {},
-        rev: v.rev + 1,
-      }));
-      const F = [w(l, !0)];
-      for (const v of S) v !== l && F.push(w(v, !0));
+      }
+      if (g || !c || !l || document.visibilityState !== "visible") return;
+      ((i.busy = !0), (i.pending = !1));
+      const F = listedDirs().map((v) => w(v, !0, !0));
       const X = () => {
         (i.busy = !1, l && fetchGit(l));
+        if (i.pending && treeAutoRef.current.silent)
+          treeAutoRef.current.silent();
       };
       Promise.all(F).then(X, X);
+    },
+    /* 切回窗口的兜底（FSEvents 偶发漏事件）。10s 节流；真正重拉交给 treeSilent。 */
+    treeAuto = () => {
+      const i = treeAutoRef.current;
+      if (g || !c || !l || document.visibilityState !== "visible") return;
+      const N = Date.now();
+      if (N - i.at < 1e4) return;
+      ((i.at = N), treeSilent());
     },
     onDel = (i) => {
       host
@@ -1252,9 +1270,16 @@ function FileBrowser(t) {
             : null,
         )
       : null;
-  /* treeAutoRef.fn 每 render 重指最新闭包，focus/visibilitychange 监听只注册一次 */
-  const treeAutoRef = React.useRef({ at: 0, busy: !1, fn: null });
+  /* treeAutoRef.fn/silent 每 render 重指最新闭包，focus 监听只注册一次 */
+  const treeAutoRef = React.useRef({
+    at: 0,
+    busy: !1,
+    pending: !1,
+    fn: null,
+    silent: null,
+  });
   ((treeAutoRef.current.fn = treeAuto),
+    (treeAutoRef.current.silent = treeSilent),
     React.useEffect(() => {
       const i = () => treeAutoRef.current.fn && treeAutoRef.current.fn();
       (window.addEventListener("focus", i),
@@ -1264,6 +1289,57 @@ function FileBrowser(t) {
           document.removeEventListener("visibilitychange", i));
       };
     }, []));
+  const expandedKey = Object.keys(m.expanded)
+    .filter((v) => m.expanded[v] && l && pathHasPrefix(v, l))
+    .sort()
+    .join("\n");
+  /* 把当前根 + 已展开目录交给 host 监视。同步走 body（换目录不先卸再订，避免空窗）。
+   * 卸监视只在收起/无根，以及组件卸载（空 deps effect）。 */
+  React.useEffect(() => {
+    if (!l || !c) {
+      host.call("workbench.treeWatch", { dirs: [] }).catch(() => {});
+      return;
+    }
+    host.call("workbench.treeWatch", { dirs: listedDirs() }).catch(() => {});
+  }, [l, c, expandedKey]);
+  React.useEffect(
+    () => () => {
+      host.call("workbench.treeWatch", { dirs: [] }).catch(() => {});
+    },
+    [],
+  );
+  /* stamp long-poll：目录内增删改后原地重拉。切走页面时不消耗 stamp（回来立即补）。 */
+  React.useEffect(() => {
+    if (!l || !c) return undefined;
+    let cancelled = false;
+    const stamp = { n: 0 };
+    const tick = async () => {
+      while (!cancelled) {
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+          await new Promise((r) => setTimeout(r, 800));
+          continue;
+        }
+        try {
+          const r = await host.call("workbench.treeWait", { since: stamp.n });
+          if (cancelled) return;
+          if (r && r.watching === false) return;
+          if (r && typeof r.stamp === "number" && r.stamp > stamp.n) {
+            if (typeof document !== "undefined" && document.visibilityState !== "visible")
+              continue;
+            stamp.n = r.stamp;
+            treeAutoRef.current.silent && treeAutoRef.current.silent();
+          }
+        } catch (e) {
+          if (cancelled) return;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    };
+    tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [l, c]);
   const fileKeys = Object.keys(gitInfo.files || {});
   const normRoot = (l || "").replace(/\/+$/, "");
   const activeChangesList = (gitInfo.filesList && gitInfo.filesList.length > 0)
@@ -3231,7 +3307,10 @@ function ImgZoomView() {
   React.useEffect(() => {
     if (!src) return undefined;
     const onKey = (ev) => {
-      if (ev.key === "Escape") imgZoomStore.set(null);
+      if (ev.key !== "Escape") return;
+      /* 吃掉 Esc，避免外层（预览缩放 / 便签下栏）同一键一起关 */
+      ev.stopPropagation();
+      imgZoomStore.set(null);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -3406,7 +3485,9 @@ function Details(t) {
     if (!zoomed) return undefined;
     const onKey = (ev) => {
       /* 图片放大开着时 Esc 归 ImgZoomView，一层一层退；编辑中 Esc 不收面板（edRef 实时读，免 deps 抖动） */
-      if (ev.key === "Escape" && !imgZoomStore.src && !edRef.current) setZoomed(!1);
+      if (ev.key !== "Escape" || imgZoomStore.src || edRef.current) return;
+      ev.stopPropagation();
+      setZoomed(!1);
     };
     document.addEventListener("keydown", onKey);
     /* 窄屏（≤1219px，对齐 13-drawer 断点）让步链派生关栏 + drawer 出场——退缩放让位，防 fixed 面板悬空撞层 */
@@ -5181,10 +5262,49 @@ function QnSelectionBubble() {
   );
 }
 
+/* 中间列定位：抽屉挂在 shell.overlay（盖住整框），必须用中间列的盒子，绝不能回退成视口全宽。
+ * 列节点取 AppFrame 里 overlay / data-side 之外的第二个 grid 子项（sidebar | center | details），
+ * 不碰构建哈希类。读不到中间列就保持上次宽度，避免上拉盖住左右栏。
+ * 坐标相对 overlay（抽屉 position:absolute），不用 viewport fixed。 */
+function qnOverlayEl() {
+  return typeof document === "undefined" ? null : document.querySelector("[data-shell-overlay]");
+}
+
+function qnFrameColumns() {
+  const overlay = qnOverlayEl();
+  const frame = overlay && overlay.parentElement;
+  if (!frame) return [];
+  const cols = [];
+  for (let i = 0; i < frame.children.length; i++) {
+    const el = frame.children[i];
+    if (el === overlay) continue;
+    if (el.getAttribute("data-side")) continue;
+    cols.push(el);
+  }
+  return cols;
+}
+
+function qnFindCenterCol() {
+  const cols = qnFrameColumns();
+  if (cols[1]) return cols[1];
+  return typeof document === "undefined" ? null : document.querySelector("[data-conversation-scroll]");
+}
+
+function qnReadCenterBand() {
+  const overlay = qnOverlayEl();
+  const col = qnFindCenterCol();
+  if (!overlay || !col) return null;
+  const origin = overlay.getBoundingClientRect();
+  const r = col.getBoundingClientRect();
+  const width = Math.round(r.width);
+  if (width <= 0) return null;
+  return { left: Math.max(0, Math.round(r.left - origin.left)), width };
+}
+
 /* 下边栏吸底抽屉：Typora 风格编辑即预览工作台 */
 function QuickNotesPanel() {
   const e = React.createElement;
-  const [colRect, setColRect] = React.useState({ left: 280, width: 800 });
+  const [colRect, setColRect] = React.useState({ left: 0, width: 0 });
   const [activeNoteText, setActiveNoteText] = React.useState("");
   const [genState, setGenState] = React.useState({ kind: "idle" });
   const [renamingName, setRenamingName] = React.useState(null);
@@ -5301,37 +5421,33 @@ function QuickNotesPanel() {
     document.addEventListener("pointerup", onUp);
   };
 
-  /* 跟踪会话列位置 */
-  React.useEffect(() => {
+  /* 跟踪中间列位置：观察三列本身（拖左右栏时 frame 宽度不变，只观察 frame 会漏） */
+  React.useLayoutEffect(() => {
     if (typeof document === "undefined") return undefined;
-    const findCol = () => {
-      const scroll = document.querySelector("[data-conversation-scroll]");
-      const col = scroll || document.querySelector(".pI_x6G_centerCol") || document.querySelector("main");
-      if (col) {
-        const r = col.getBoundingClientRect();
-        return { left: Math.round(r.left), width: Math.round(r.width) };
-      }
-      return { left: 0, width: window.innerWidth };
-    };
     const update = () => {
-      const r = findCol();
+      const r = qnReadCenterBand();
+      if (!r) return;
       setColRect((prev) => (prev.left !== r.left || prev.width !== r.width ? r : prev));
     };
     update();
-    const scroll = document.querySelector("[data-conversation-scroll]");
-    const ro = typeof ResizeObserver !== "undefined" && scroll ? new ResizeObserver(update) : null;
-    if (ro && scroll) ro.observe(scroll);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    if (ro) {
+      const cols = qnFrameColumns();
+      for (let i = 0; i < cols.length; i++) ro.observe(cols[i]);
+      const scroll = document.querySelector("[data-conversation-scroll]");
+      if (scroll) ro.observe(scroll);
+    }
     window.addEventListener("resize", update);
     return () => {
       if (ro) ro.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, []);
+  }, [qnStore.open]);
 
-  /* 会话列挤压 padding-bottom */
+  /* 会话列挤压 padding-bottom（只垫滚动口，不碰哈希类） */
   React.useEffect(() => {
     if (typeof document === "undefined") return undefined;
-    const col = document.querySelector(".pI_x6G_centerCol") || document.querySelector("[data-conversation-scroll]");
+    const col = document.querySelector("[data-conversation-scroll]");
     if (!col) return undefined;
     if (!col.style.transition) col.style.transition = "padding-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
     col.style.paddingBottom = qnStore.open ? qnStore.height + "px" : "0px";
@@ -5401,6 +5517,7 @@ function QuickNotesPanel() {
   }, [qnStore.selectedFolder, qnStore.notes, qnStore.open, qnStore.selected]);
 
   if (!qnStore.open) return null;
+  if (colRect.width <= 0) return null;
 
   /* 顶部高度拖拽手柄 */
   const onDragStart = (ev) => {
@@ -6382,7 +6499,7 @@ return {
     const s = t.get("layout"),
       o = t.get("sessions"),
       a = t.get("workspaces");
-    (mountStyle(API + "/wb/style.css?v=2.1.0&t=" + Date.now()),
+    (mountStyle(API + "/wb/style.css?v=2.0.5&t=" + Date.now()),
       host
         .call("workbench.notesGet", {})
         .then((u) => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// dsh-archive-manager host 冒烟：archiveApi 路由的校验/私有面行为。
+// dsh-geek-archive host 冒烟：archiveApi 路由的校验/私有面行为。
 import { archiveApi } from '../lib/archive.js'
 
 let passed = 0, failed = 0

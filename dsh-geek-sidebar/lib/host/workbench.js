@@ -9,7 +9,7 @@
  *  - 跨平台：文件操作走 node:fs；仅 git / 系统选择器 / zip / reveal 经 shell，且按平台分支；
  *  - docx 预览仅 macOS（textutil），其它平台优雅报错。
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync, watch } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { httpError } from './http.js'
@@ -170,6 +170,11 @@ export const WORKBENCH_DEFAULTS = {
   rawMaxMB: 20,         // /wb/raw 文件流上限
   writeMaxMB: 1,        // writeFile 写入上限
   notesMaxDirs: 8,      // 笔记目录历史上限
+  gitCacheTtlSec: 60,  // git 项目映射缓存 TTL
+  treeWatch: true,     // 文件树目录监视（项目/知识库增删改后抬 stamp）
+  treeWatchDebounceMs: 200, // 监视事件合并窗口
+  treeWaitMs: 25000,   // treeWait 最长挂起
+  treeWatchMaxDirs: 64, // 同时监视的目录上限（根 + 已展开）
   quickNotesDir: '',    // 便签目录固定覆盖（空 = 用户偏好或 ~/.dsh/quick-notes）
   quickNotesCapture: true, // 划选采集气泡总开关（经 qnState 下发给 client）
   quickNotesMax: 500,   // 便签目录扫描条数上限
@@ -304,6 +309,91 @@ export function workbenchApi(ctx, cfg) {
       alive.push({ path: wt.path, branch: wt.branch, isMain: alive.length === 0 })
     }
     return alive
+  }
+
+  /* ---------- 文件树目录监视（项目根 / 知识库当前目录 + 已展开子目录）
+   * 不递归整仓：客户端声明当前列出的目录，host 对各目录 fs.watch（非 recursive）。
+   * 目录内增删改/重命名抬 stamp；客户端 treeWait long-poll 后再原地 listDir。
+   * 跳过 node_modules/.git 等噪声目录；.DS_Store 事件忽略（macOS 浏览即写）。 */
+  const TREE_WATCH_SKIP = new Set(['node_modules', '.git', '.svn', '.hg'])
+  const TREE_WATCH_SKIP_FILE = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini'])
+  const treeWatchers = new Map()
+  const treeWaiters = new Set()
+  let treeStamp = 0
+  let treeDebounce = null
+  const treeWatchEnabled = C.treeWatch !== false
+  const treeDebounceMs = Math.max(50, Number(C.treeWatchDebounceMs) || 200)
+  const treeWaitDefaultMs = Math.max(0, Number(C.treeWaitMs) || 25000)
+  const treeWatchMax = Math.max(1, Number(C.treeWatchMaxDirs) || 64)
+  const closeTreeWatcher = (p) => {
+    const w = treeWatchers.get(p)
+    if (!w) return
+    try { w.close() } catch { /* ignore */ }
+    treeWatchers.delete(p)
+  }
+  const closeAllTreeWatches = () => {
+    for (const p of [...treeWatchers.keys()]) closeTreeWatcher(p)
+  }
+  const flushTreeWaiters = () => {
+    for (const w of [...treeWaiters]) w.done()
+  }
+  const bumpTree = () => {
+    treeStamp += 1
+    flushTreeWaiters()
+  }
+  const scheduleTreeBump = () => {
+    if (treeDebounce) clearTimeout(treeDebounce)
+    treeDebounce = setTimeout(() => {
+      treeDebounce = null
+      bumpTree()
+    }, treeDebounceMs)
+  }
+  const normWatchPath = (p) => {
+    const raw = expandHome(String(p || ''))
+    if (!raw || !isAbs(raw)) return ''
+    const t = raw.replace(/[\\/]+$/, '')
+    if (!t) return '/'
+    if (/^[A-Za-z]:$/.test(t)) return t + '\\'
+    return t
+  }
+  const skipWatchDir = (p) => TREE_WATCH_SKIP.has(baseName(p))
+  const watchOneDir = (p) => {
+    if (!treeWatchEnabled || !p || treeWatchers.has(p) || skipWatchDir(p)) return
+    if (treeWatchers.size >= treeWatchMax) return
+    try {
+      if (!existsSync(p) || !statSync(p).isDirectory()) return
+      const w = watch(p, { persistent: true }, (_event, filename) => {
+        const name = filename == null ? '' : String(filename)
+        if (name && (TREE_WATCH_SKIP_FILE.has(name) || TREE_WATCH_SKIP.has(name))) return
+        scheduleTreeBump()
+      })
+      w.on('error', () => closeTreeWatcher(p))
+      treeWatchers.set(p, w)
+    } catch { /* 目录已删/无权限：跳过 */ }
+  }
+  const syncTreeWatches = (dirs) => {
+    const want = []
+    const seen = new Set()
+    for (const raw of dirs) {
+      const p = normWatchPath(raw)
+      if (!p || seen.has(p) || skipWatchDir(p)) continue
+      seen.add(p)
+      want.push(p)
+      if (want.length >= treeWatchMax) break
+    }
+    const wantSet = new Set(want)
+    for (const p of [...treeWatchers.keys()]) {
+      if (!wantSet.has(p)) closeTreeWatcher(p)
+    }
+    for (const p of want) watchOneDir(p)
+    return { stamp: treeStamp, watching: treeWatchEnabled, dirs: [...treeWatchers.keys()] }
+  }
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => () => {
+      if (treeDebounce) clearTimeout(treeDebounce)
+      closeAllTreeWatches()
+      flushTreeWaiters()
+    })
   }
 
   /* ---------- 笔记目录偏好（~/.dsh/workbench-notes.json，node:fs 直读写） ---------- */
@@ -580,6 +670,41 @@ export function workbenchApi(ctx, cfg) {
       } catch (e) {
         return { entries: [], error: msgOf(e) }
       }
+    },
+
+    /* 订阅当前文件树列出的目录；dirs=[] 卸掉全部监视。返回当前 stamp。 */
+    'POST /wb/treeWatch': async ({ body }) => {
+      const dirs = (body && Array.isArray(body.dirs)) ? body.dirs.map(String) : []
+      return syncTreeWatches(dirs)
+    },
+
+    /* long-poll：stamp 已超 since 立即返回；否则等到监视事件或 timeoutMs。 */
+    'POST /wb/treeWait': async ({ body, req }) => {
+      const since = Number(body && body.since)
+      const sinceN = Number.isFinite(since) ? since : 0
+      const timeoutMs = body && body.timeoutMs != null
+        ? Math.min(60000, Math.max(0, Number(body.timeoutMs) || 0))
+        : treeWaitDefaultMs
+      if (!treeWatchEnabled) return { stamp: treeStamp, watching: false }
+      if (treeStamp > sinceN) return { stamp: treeStamp, watching: true }
+      if (timeoutMs <= 0) return { stamp: treeStamp, watching: true }
+      return new Promise((resolve) => {
+        let settled = false
+        const done = () => {
+          if (settled) return
+          settled = true
+          treeWaiters.delete(entry)
+          clearTimeout(t)
+          resolve({ stamp: treeStamp, watching: true })
+        }
+        const entry = { done }
+        const t = setTimeout(done, timeoutMs)
+        treeWaiters.add(entry)
+        if (req && typeof req.on === 'function') {
+          req.on('close', done)
+          req.on('aborted', done)
+        }
+      })
     },
 
     'POST /wb/readFile': async ({ body }) => {

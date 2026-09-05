@@ -1,8 +1,8 @@
 {
-  "name": "dsh-archive-manager",
-  "version": "0.1.0",
+  "name": "dsh-geek-archive",
+  "version": "1.2.0",
   "license": "MIT",
-  "description": "会话归档管理：侧栏独立入口面板，列出已归档会话，可放回对话或永久删除。",
+  "description": "归档会话管理：在设置面板加一节「归档管理」，列出已归档会话，可放回对话或永久删除，补上 DSH 缺失的归档反向操作。",
   "keywords": [
     "dsh",
     "deepseek-harness",

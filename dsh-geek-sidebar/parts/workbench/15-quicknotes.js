@@ -775,10 +775,49 @@ function QnSelectionBubble() {
   );
 }
 
+/* 中间列定位：抽屉挂在 shell.overlay（盖住整框），必须用中间列的盒子，绝不能回退成视口全宽。
+ * 列节点取 AppFrame 里 overlay / data-side 之外的第二个 grid 子项（sidebar | center | details），
+ * 不碰构建哈希类。读不到中间列就保持上次宽度，避免上拉盖住左右栏。
+ * 坐标相对 overlay（抽屉 position:absolute），不用 viewport fixed。 */
+function qnOverlayEl() {
+  return typeof document === "undefined" ? null : document.querySelector("[data-shell-overlay]");
+}
+
+function qnFrameColumns() {
+  const overlay = qnOverlayEl();
+  const frame = overlay && overlay.parentElement;
+  if (!frame) return [];
+  const cols = [];
+  for (let i = 0; i < frame.children.length; i++) {
+    const el = frame.children[i];
+    if (el === overlay) continue;
+    if (el.getAttribute("data-side")) continue;
+    cols.push(el);
+  }
+  return cols;
+}
+
+function qnFindCenterCol() {
+  const cols = qnFrameColumns();
+  if (cols[1]) return cols[1];
+  return typeof document === "undefined" ? null : document.querySelector("[data-conversation-scroll]");
+}
+
+function qnReadCenterBand() {
+  const overlay = qnOverlayEl();
+  const col = qnFindCenterCol();
+  if (!overlay || !col) return null;
+  const origin = overlay.getBoundingClientRect();
+  const r = col.getBoundingClientRect();
+  const width = Math.round(r.width);
+  if (width <= 0) return null;
+  return { left: Math.max(0, Math.round(r.left - origin.left)), width };
+}
+
 /* 下边栏吸底抽屉：Typora 风格编辑即预览工作台 */
 function QuickNotesPanel() {
   const e = React.createElement;
-  const [colRect, setColRect] = React.useState({ left: 280, width: 800 });
+  const [colRect, setColRect] = React.useState({ left: 0, width: 0 });
   const [activeNoteText, setActiveNoteText] = React.useState("");
   const [genState, setGenState] = React.useState({ kind: "idle" });
   const [renamingName, setRenamingName] = React.useState(null);
@@ -895,37 +934,33 @@ function QuickNotesPanel() {
     document.addEventListener("pointerup", onUp);
   };
 
-  /* 跟踪会话列位置 */
-  React.useEffect(() => {
+  /* 跟踪中间列位置：观察三列本身（拖左右栏时 frame 宽度不变，只观察 frame 会漏） */
+  React.useLayoutEffect(() => {
     if (typeof document === "undefined") return undefined;
-    const findCol = () => {
-      const scroll = document.querySelector("[data-conversation-scroll]");
-      const col = scroll || document.querySelector(".pI_x6G_centerCol") || document.querySelector("main");
-      if (col) {
-        const r = col.getBoundingClientRect();
-        return { left: Math.round(r.left), width: Math.round(r.width) };
-      }
-      return { left: 0, width: window.innerWidth };
-    };
     const update = () => {
-      const r = findCol();
+      const r = qnReadCenterBand();
+      if (!r) return;
       setColRect((prev) => (prev.left !== r.left || prev.width !== r.width ? r : prev));
     };
     update();
-    const scroll = document.querySelector("[data-conversation-scroll]");
-    const ro = typeof ResizeObserver !== "undefined" && scroll ? new ResizeObserver(update) : null;
-    if (ro && scroll) ro.observe(scroll);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    if (ro) {
+      const cols = qnFrameColumns();
+      for (let i = 0; i < cols.length; i++) ro.observe(cols[i]);
+      const scroll = document.querySelector("[data-conversation-scroll]");
+      if (scroll) ro.observe(scroll);
+    }
     window.addEventListener("resize", update);
     return () => {
       if (ro) ro.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, []);
+  }, [qnStore.open]);
 
-  /* 会话列挤压 padding-bottom */
+  /* 会话列挤压 padding-bottom（只垫滚动口，不碰哈希类） */
   React.useEffect(() => {
     if (typeof document === "undefined") return undefined;
-    const col = document.querySelector(".pI_x6G_centerCol") || document.querySelector("[data-conversation-scroll]");
+    const col = document.querySelector("[data-conversation-scroll]");
     if (!col) return undefined;
     if (!col.style.transition) col.style.transition = "padding-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
     col.style.paddingBottom = qnStore.open ? qnStore.height + "px" : "0px";
@@ -995,6 +1030,7 @@ function QuickNotesPanel() {
   }, [qnStore.selectedFolder, qnStore.notes, qnStore.open, qnStore.selected]);
 
   if (!qnStore.open) return null;
+  if (colRect.width <= 0) return null;
 
   /* 顶部高度拖拽手柄 */
   const onDragStart = (ev) => {

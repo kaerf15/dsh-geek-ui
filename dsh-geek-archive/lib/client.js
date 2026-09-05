@@ -1,5 +1,5 @@
 /**
- * dsh-archive-manager client 半（单文件：平台以 /plugins/dsh-archive-manager/client.js 直发浏览器）。
+ * dsh-geek-archive client 半（单文件：平台以 /plugins/dsh-geek-archive/client.js 直发浏览器）。
  *
  * 注册为设置面板里单独一节（settings.section 列表槽，id=archive-manager），列出全部已归档会话，
  * 每条可「放回对话」或「删除」（两次点击确认）。数据走框架站立座（renderer PropsRuntime 全局份）：
@@ -7,7 +7,7 @@
  * host 侧解除归档/删除后，平台 WorkspaceFeed 会经 domain/changed 自动推 archived 帧，无需手动刷新。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-archive-manager',
+  id: 'dsh-geek-archive',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState } = React
     const h = React.createElement
-    const API = '/__dsh-archive-manager__'
+    const API = '/__dsh-geek-archive__'
 
     /* ---------- host 调用 ---------- */
     async function api(method, path, body) {
@@ -56,9 +56,9 @@ window.__ModuleLoader__.load({
       '.am-hint { color:var(--dsw-alias-label-secondary);font-size:12px;text-align:center;padding:24px 8px }',
     ].join('\n')
     function mountStyle() {
-      if (document.getElementById('dsh-archive-manager-style')) return
+      if (document.getElementById('dsh-geek-archive-style')) return
       const el = document.createElement('style')
-      el.id = 'dsh-archive-manager-style'
+      el.id = 'dsh-geek-archive-style'
       el.textContent = CSS
       document.head.appendChild(el)
     }
@@ -126,7 +126,7 @@ window.__ModuleLoader__.load({
     }
 
     /* ---------- 模块出口 ---------- */
-    exports.name = 'dsh-archive-manager'
+    exports.name = 'dsh-geek-archive'
     /* 仅 slots：把归档节注册进平台设置面板；useSessions/useWorkspaces 由 renderer 经 props 供，
      * 不需要注入 sessions/workspaces 服务。 */
     exports.inject = ['slots']
@@ -140,7 +140,7 @@ window.__ModuleLoader__.load({
             (u) => h(ArchiveManager, { close: u.close, useSessions: u.useSessions, useWorkspaces: u.useWorkspaces }),
           ),
         )
-      } catch (e) { console.error('[dsh-archive-manager] 归档节注册失败', e) }
+      } catch (e) { console.error('[dsh-geek-archive] 归档节注册失败', e) }
     }
 
     return module.exports
