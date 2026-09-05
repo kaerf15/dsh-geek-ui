@@ -33,7 +33,14 @@ const STORE_MAX_BUCKETS = 50,
     open(t, e) {
       const s = store.bucket(t);
       /* 已打开也要激活 + fire——旧版 || 短路导致"重复点击已打开文件不切换"（评审 P2） */
-      if (!s.files.some((o) => o.path === e.path)) s.files = s.files.concat([e]);
+      const exIdx = s.files.findIndex((o) => o.path === e.path);
+      if (exIdx >= 0) {
+        const next = s.files.slice();
+        next[exIdx] = Object.assign({}, next[exIdx], { modeHint: e.modeHint });
+        s.files = next;
+      } else {
+        s.files = s.files.concat([e]);
+      }
       s.active = e.path;
       bus.fire();
     },
@@ -54,8 +61,8 @@ const STORE_MAX_BUCKETS = 50,
   bus = {
     fns: [],
     chans: {},
-    /* 频道语义（评审修复：热路径扇出拆分——原先单 bus，ACP 20fps 流式 chunk 把
-     * 侧栏树/详情 markdown 一起拖着重渲染）：
+    /* 频道语义（评审修复：热路径扇出拆分——热路径事件走专属频道，
+     * 避免把侧栏树/详情 markdown 等无关订阅者拖着重渲染）：
      *   fire()    全局 + 全部频道（稀有事件，兼容旧订阅，人人听得到）；
      *   fire(ch)  仅该频道（热路径专用：只有订阅该频道的视图重渲染） */
     fire(t) {
@@ -105,48 +112,41 @@ const STORE_MAX_BUCKETS = 50,
   imgZoomStore = createValueStore({ src: null }, (s, v) => {
     s.src = v || null;
   }),
-  /* 下侧边栏（助手面板）开态：open/tab/height。组件在 15-bottom-panel.js，
-   * store 必须放最前——渲染若早于后续文件求值会踩跨文件 TDZ（实战踩过）。 */
-  bottomPanel = {
-    open: false,
-    tab: "terminal",
-    height: (() => {
-      /* 非浏览器环境（smoke eval）无 window，兜底 360 */
-      try {
-        const w = typeof window !== "undefined" ? window : null;
-        const v = w && w.localStorage ? Number(w.localStorage.getItem("pw-bpanel-h")) : 0;
-        if (v >= 140 && v <= 900) return v;
-        if (w && w.innerHeight) return Math.max(180, Math.round(w.innerHeight * 0.42));
-      } catch (e) {}
-      return 360;
-    })(),
-    set(patch) {
-      Object.assign(bottomPanel, patch);
-      bus.fire();
+  /* 便签（quick notes）全局池 store：
+   * open: 面板开闭；height: 吸底抽屉高度；selected: 当前选中的便签 name；
+   * dir/custom: 当前目录与自定义标记；capture: 划选气泡总开关；
+   * notes: 便签列表（null=未加载）；q: 搜索词；editing: 编辑中的便签（null/对象）；
+   * confirm: 待确认删除的 name；kbPick: 待转存知识库的 name；toast: 提示消息。 */
+  qnStore = createValueStore(
+    {
+      open: false,
+      height: (() => {
+        try {
+          const w = typeof window !== "undefined" ? window : null;
+          const v = w && w.localStorage ? Number(w.localStorage.getItem("pw-qn-height")) : 0;
+          if (v >= 160 && v <= 2400) return v;
+          if (w && w.innerHeight) return Math.max(200, Math.min(480, Math.round(w.innerHeight * 0.36)));
+        } catch {}
+        return 300;
+      })(),
+      selected: null,
+      dir: '',
+      custom: false,
+      capture: true,
+      notes: null,
+      loading: false,
+      q: '',
+      folders: [],
+      noteFolders: {},
+      selectedFolder: null,
+      showFolders: true,
+      folderWidth: 160,
+      toast: null,
     },
-  },
-  /* 底部区域仲裁：第三方经 dshBottomPanels.acquire(id) 独占占位，占位期间我们的面板
-   * 让位（open 状态保留，release 后自动归位）——对齐右栏 details 的"它开我们让位、
-   * 它关我们归位"。右栏靠 single 槽 priority 天然仲裁；shell.overlay 是多槽无此语义，
-   * 故自建排他锁。面板组件在 15-bottom-panel.js，消费方 BottomPanel 渲染与挤压都读它。 */
-  bottomArea = {
-    owner: null,
-    acquire(t) {
-      if (!t || (bottomArea.owner && bottomArea.owner !== t)) return false;
-      if (bottomArea.owner === t) return true;
-      ((bottomArea.owner = t), bus.fire());
-      return true;
+    (s, v) => {
+      Object.assign(s, v);
     },
-    release(t) {
-      if (!bottomArea.owner) return false;
-      if (t !== undefined && bottomArea.owner !== t) return false;
-      ((bottomArea.owner = null), bus.fire());
-      return true;
-    },
-    isYielded() {
-      return !!bottomArea.owner;
-    },
-  };
+  );
 function useNotes() {
   const t = React.useState(0);
   return (
@@ -154,11 +154,30 @@ function useNotes() {
     { dirs: notesStore.dirs, current: notesStore.current }
   );
 }
+/* 路径字符串工具（分隔符兼容）：host 在 Windows 上回传反斜杠路径（C:\foo\bar），
+ * client 只按字符串处理——两种分隔符都认，且保持路径自身的分隔符风格。 */
 const baseName = (t) =>
   String(t || "")
-    .replace(/\/+$/, "")
-    .split("/")
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
     .pop() || "";
+/* 取父目录（字符串级）：'/a/b' → '/a'；'C:\a\b' → 'C:\a'；'/a' → '/'；'C:\a' → 'C:'。 */
+function pathDir(t) {
+  const s = String(t || "").replace(/[\\/]+$/, "");
+  const m = s.match(/^(.*)[\\/][^\\/]+$/);
+  if (!m) return "";
+  return m[1] || (s.startsWith("/") ? "/" : m[1]);
+}
+/* t 是否等于 prefix 或是其子孙（两种分隔符都认）。 */
+function pathHasPrefix(t, prefix) {
+  return t === prefix || t.startsWith(prefix + "/") || t.startsWith(prefix + "\\");
+}
+/* 按基准路径自身的分隔符风格拼接（展示/相对解析用）。 */
+function pathJoinFor(base, leaf) {
+  const s = String(base || "");
+  const sep = s.includes("\\") ? "\\" : "/";
+  return s.replace(/[\\/]+$/, "") + sep + leaf;
+}
 function useFilesTab() {
   const t = React.useState(filesTabStore.tab);
   return (
@@ -167,12 +186,13 @@ function useFilesTab() {
   );
 }
 const pickNotesDir = () => {
-    host
-      .call("workbench.notesPick", {})
+    /* 1.19.11 起换应用内 DirPicker（复刻 pi-web，见 15-dirpicker.js），不再调 host 的
+     * notesPick（osascript 原生对话框）；1.19.12 起落点走默认目录（桌面，星钮可自定）。
+     * 选出路径后复用 notesSelect 落库，语义不变 */
+    pickDir({ title: "选择知识库目录" })
       .then((t) => {
         t &&
-          t.ok &&
-          (notesStore.set(t),
+          (selectNotesDir(t),
           viewStore.set("main"),
           filesTabStore.set("notes"));
       })
@@ -216,7 +236,8 @@ function relTime(t) {
  * 注：PencilIcon 未一并收敛（skills 版 11px 固定 vs 本侧 13px 参数化），见 05-icons */
 function canonPath(t) {
   return String(t || "")
-    .replace(/\/+$/, "")
+    .replace(/[\\/]+$/, "")
+    .replace(/\\/g, "/")
     .toLowerCase();
 }
 /* 跨文件共享的工作区态：当前项目根（@提及/终端 cwd/技能弹窗用）与文件管理器展开偏好。

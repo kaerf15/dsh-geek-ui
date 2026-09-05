@@ -69,15 +69,64 @@ function ArchiveIcon(t) {
     t,
   );
 }
-function FolderIcon(t) {
+function FolderIcon(t, open) {
+  const e = t || 14;
+  return React.createElement(
+    "svg",
+    {
+      width: e,
+      height: e,
+      viewBox: "0 0 16 16",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.25,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      style: { verticalAlign: "middle", flexShrink: 0 },
+    },
+    React.createElement("path", {
+      d: open
+        ? "m1.87 8 .7-2.74a1 1 0 01.96-.76h10.94a1 1 0 01.97 1.24l-1.75 7a1 1 0 01-.97.76H2A1.5 1.5 0 01.5 12V3.5a1 1 0 011-1h5a1 1 0 011 1v1"
+        : "M4.5 4.5H12c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5H2A1.5 1.5 0 01.5 12V3.5a1 1 0 011-1h5a1 1 0 011 1v1",
+    }),
+  );
+}
+function SearchIcon(t) {
   return ic(
     [
-      [
-        "p",
-        "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z",
-      ],
+      ["c", 11, 11, 7],
+      ["l", 21, 21, 16.65, 16.65],
     ],
     t,
+  );
+}
+function PlusIcon(t) {
+  return ic(
+    [
+      ["l", 12, 5, 12, 19],
+      ["l", 5, 12, 19, 12],
+    ],
+    t,
+  );
+}
+function GitChangesIcon(t) {
+  const e = t || 13;
+  return React.createElement(
+    "svg",
+    {
+      width: e,
+      height: e,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 2,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      style: { verticalAlign: "middle", flexShrink: 0 },
+    },
+    React.createElement("circle", { cx: 12, cy: 12, r: 3 }),
+    React.createElement("path", { d: "M3 12h6" }),
+    React.createElement("path", { d: "M15 12h6" }),
   );
 }
 function FileIcon(t) {

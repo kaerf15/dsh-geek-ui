@@ -1,7 +1,9 @@
 
     /* ============================ 模块出口 ============================ */
     exports.name = 'dsh-geek-sidebar'
-    exports.inject = ['sessions', 'slots']
+    /* uiWorkspace / workspaces / layout：workbench 硬依赖；未声明时 fiber 可在服务就绪前
+     * apply，ctx.get("uiWorkspace") 得 undefined 且闭包固化——「＋ 新建」静默无反应。 */
+    exports.inject = ['sessions', 'slots', 'uiWorkspace', 'workspaces', 'layout']
     exports.apply = function apply(ctx) {
       /* filemention 必须先于 workbench：后者经 fileMentionBridge 惰性取用
        *（ctx.get 在 fiber 启动态拿不到，见 head.js 桥注释） */

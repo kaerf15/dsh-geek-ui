@@ -258,7 +258,9 @@ function parseSearchOutput(raw) {
 }
 async function searchSkills(query, limit) {
   try {
-    const res = await fetch(`${SEARCH_API}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { cache: 'no-store' })
+    /* 主路径必须带超时（与 fetchJson 的 CHECK_TIMEOUT_MS 同纪律）：skills.sh 挂起时
+     * 裸 fetch 会把路由挂在半空，连接占住不返错（评审修复 N1） */
+    const res = await fetch(`${SEARCH_API}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { cache: 'no-store', signal: AbortSignal.timeout(CHECK_TIMEOUT_MS) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     const out = []
@@ -467,7 +469,14 @@ export function skillsApi() {
     'POST /skills/prefs': ({ body }) => {
       const dir = String(body.globalDir || '').trim()
       if (!dir) throw httpError(400, 'globalDir required')
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      /* 打错的路径必须报错——静默 mkdir 会把输错的目录变成真目录（评审修复 B6） */
+      let st
+      try {
+        st = statSync(dir)
+      } catch {
+        throw httpError(404, 'not found: ' + dir)
+      }
+      if (!st.isDirectory()) throw httpError(400, 'not a directory')
       writePrefs({ globalDir: dir })
       return { success: true, globalDir: dir }
     },

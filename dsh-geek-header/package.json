@@ -1,8 +1,8 @@
 {
-  "name": "dsh-geek-sidebar",
-  "version": "2.0.0",
+  "name": "dsh-geek-header",
+  "version": "0.4.5",
   "license": "MIT",
-  "description": "DSH Web 极客侧栏：工作台侧栏与文件预览、便签划选与引用、技能管理弹窗、@文件提及桥、chat 文件点击接管。",
+  "description": "DSH Web 页头重排：第一行第三方插件区（geekUiHeader 服务），第二行收纳页签/谱系/动作平铺，面包屑文字与 Session log 隐藏，拥挤时动作折叠进 ⋯ 菜单。",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -21,9 +21,6 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
-  },
   "exports": {
     ".": "./index.js",
     "./client": "./lib/client.js",
@@ -39,7 +36,6 @@
     }
   },
   "scripts": {
-    "build": "node parts/build.mjs",
     "test": "node parts/smoke.mjs"
   }
 }

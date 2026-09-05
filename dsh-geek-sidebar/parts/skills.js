@@ -13,7 +13,13 @@
     }
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 
-    function shortenPath(p) { return String(p || '').replace(/^\/(?:Users|home)\/[^/]+/, '~') }
+    function shortenPath(p) { return String(p || '').replace(/^\/(?:Users|home)\/[^/]+/, '~').replace(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+/, '~') }
+    /* 展示用拼接：按基准路径自身的分隔符风格（Windows 反斜杠路径不混入正斜杠） */
+    function joinDisplay(base, leaf) {
+      const s = String(base || '')
+      const sep = s.includes('\\') ? '\\' : '/'
+      return s.replace(/[\\/]+$/, '') + sep + leaf
+    }
     function shortVersion(v) { return v ? String(v).slice(0, 8) : 'unknown' }
     function updateKey(skill) { return skill.install ? skill.install.scope + '\0' + skill.install.package : null }
     function groupOf(skill) {
@@ -134,7 +140,7 @@
           props.onInstalled()
         } catch (e) { setInstallError(String(e && e.message ? e.message : e)) } finally { setInstalling(null) }
       }
-      const installPath = scope === 'global' ? shortenPath(props.globalDir) + '/' : shortenPath(props.cwd) + '/.agents/skills/'
+      const installPath = scope === 'global' ? joinDisplay(shortenPath(props.globalDir), '') : joinDisplay(shortenPath(props.cwd), '.agents/skills/')
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', height: '100%' } },
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 } },
@@ -358,7 +364,7 @@
                     style: { fontSize: 11, fontFamily: MONO, padding: '2px 6px', border: '1px solid ' + V.accent, borderRadius: 4, background: V.bg, color: V.text, outline: 'none', width: 220 },
                   })
                 : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-                    h('code', { style: { fontSize: 11, color: V.muted, fontFamily: MONO, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: 'global 技能目录' }, shortenPath(globalDir) + '/'),
+                    h('code', { style: { fontSize: 11, color: V.muted, fontFamily: MONO, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: 'global 技能目录' }, joinDisplay(shortenPath(globalDir), '')),
                     h('button', {
                       onClick: () => { setPathDraft(globalDir); setPathEditing(true) },
                       title: '编辑 global 技能目录',

@@ -5,11 +5,17 @@ return {
     const s = t.get("layout"),
       o = t.get("sessions"),
       a = t.get("workspaces");
-    (mountStyle(API + "/wb/style.css"),
+    (mountStyle(API + "/wb/style.css?v=2.1.0&t=" + Date.now()),
       host
         .call("workbench.notesGet", {})
         .then((u) => {
           u && notesStore.set(u);
+        })
+        .catch(() => {}),
+      host
+        .call("workbench.qnState", {})
+        .then((u) => {
+          u && u.ok && qnStore.set({ dir: u.dir, custom: u.custom, capture: u.capture });
         })
         .catch(() => {}));
     const l = fileMentionBridge;
@@ -22,20 +28,10 @@ return {
       close: (id) => panelStore.close(id),
       isOpen: (id) => panelStore.isOpen(id),
     };
-    /* 底部区域仲裁服务：第三方经 ctx.inject(['dshBottomPanels'], cb) 接入。
-       acquire(id) 独占占位（排他，被占即 false），占位期间我们的底部面板让位
-       （渲染 null + 撤挤压，open 状态保留）；release(id) 归还后自动归位。
-       对齐右栏 details 单槽 priority 的让位语义——shell.overlay 是多槽，无平台仲裁，故自建。 */
-    t.provide("dshBottomPanels");
-    t.dshBottomPanels = {
-      acquire: (id) => bottomArea.acquire(id),
-      release: (id) => bottomArea.release(id),
-      owner: () => bottomArea.owner,
-      isYielded: () => bottomArea.isYielded(),
-    };
     /* @文件引用走 rc.8 原生 ui-reference 源（reference 组），插件不再注册
        * 自有 workbenchFile 组（v1.16.0 起移除，能力重叠）。
-       * 侧栏"提及"仍走 dshFileMention 桥（insert-text 纯文本路径，原生无对应物）。 */
+       * 侧栏/详情"提及"仍走 dshFileMention 桥，但改投 slash/input-insert-reference
+       * 插成本地 chip（复用 reference 源 codec），与输入框原生 @ 一致。 */
     (e.inject("sidebar.workspaces", () =>
         e.register({ name: "sidebar.workspaces", priority: -5 }, (u) =>
           React.createElement(Sidebar, {
@@ -45,6 +41,7 @@ return {
             layout: s,
             sessionsSvc: o,
             workspacesSvc: a,
+            workspaceNav: t.get("uiWorkspace"),
             mentionBridge: l,
           }),
         ),
@@ -75,8 +72,18 @@ return {
           }),
         ),
       ),
+      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
+       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览；修饰键点击
+       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
+      installDelivChipHook(),
+      /* 便签小胶囊引用源通道注册（15-quicknotes）：通过 inputTriggers 注册 @geek-notes-quote 源 */
+      installQnQuote(t),
+      /* DirPicker 单实例宿主：多处路径选择（项目/笔记/便签）共用的应用内目录选择模态 */
       e.inject("shell.overlay", () =>
-        e.register({ name: "shell.overlay", id: "workbench-bottom-panel" }, () => React.createElement(BottomPanel, { workspacesSvc: a })),
+        e.register({ name: "shell.overlay", id: "workbench-dir-picker" }, () => React.createElement(DirPickerHost, null)),
+      ),
+      e.inject("shell.overlay", () =>
+        e.register({ name: "shell.overlay", id: "workbench-quick-notes" }, () => React.createElement(QuickNotesHost, null)),
       ),
       e.inject("shell.overlay", () =>
         e.register(

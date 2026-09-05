@@ -1,10 +1,27 @@
-# DSH 插件
+# DSH Geek UI
 
-## dsh-geek-sidebar（v1.19.6 · verifiedWith 0.1.0-rc.8）
+> DeepSeek Harness Web 工作台的极客增强组件：**页头重排 + 极客侧栏**，一个让 dsh web 好用到离不开的静态 bundle 组合。
 
-DSH Web 极客侧栏：工作台侧栏 + 文件管理器/预览 + 技能管理 + @文件提及桥 + ACP 智能体面板 + 内嵌终端，一个静态 bundle。
+![npm](https://img.shields.io/npm/v/dsh-geek-header?label=dsh-geek-header&logo=npm) ![npm](https://img.shields.io/npm/v/dsh-geek-sidebar?label=dsh-geek-sidebar&logo=npm) ![dsh](https://img.shields.io/badge/verifiedWith-0.1.2--rc.1-8A2BE2) ![license](https://img.shields.io/badge/license-MIT-green)
 
-### 四大亮点（实拍）
+## 安装
+
+```bash
+dsh plugin --profile web add dsh-geek-header
+dsh plugin --profile web add dsh-geek-sidebar
+```
+
+两条命令，装完即用，随 profile 重启常驻。（自定义了 profile 名就把 `web` 换成你的）
+
+## dsh-geek-header（v0.4.5 · verifiedWith 0.1.2-rc.1）
+
+DSH Web 页头重排 + 会话标题一键生成：第一行第三方插件区（geekUiHeader 服务），第二行收纳页签/谱系/动作平铺，面包屑文字与 Session log 隐藏，拥挤时动作折叠进 ⋯ 菜单；「生成标题」读整段对话、用你当前选中的模型生成会话标题，生成中/成功/失败都有即时反馈。布局与设计细节见 [dsh-geek-header/README.md](dsh-geek-header/README.md)。
+
+## dsh-geek-sidebar（v2.0.0 · verifiedWith 0.1.2-rc.1）
+
+DSH Web 极客侧栏：工作台侧栏 + 文件管理器/预览 + 便签与划选引用 + 技能管理 + @文件提及桥 + chat 文件点击接管，一个静态 bundle。
+
+### 五大亮点（实拍）
 
 **1. 项目与会话管理**——左栏就是你的项目指挥部：一键切换工作区（还能自定义任意目录）、每个项目的会话一目了然。正在跑的会话有个小圆点提醒你，别的工作区有几条会话在跑，工作区按钮上的数字徽标直接告诉你，不用挨个点开看。git worktree 也能直接查看和新建。
 
@@ -14,7 +31,7 @@ DSH Web 极客侧栏：工作台侧栏 + 文件管理器/预览 + 技能管理 +
 
 ![@功能](screenshots/at-mention.png)
 
-**3. 笔记功能**——侧栏底部的"笔记"页签是你所有笔记目录的入口：多个目录随时切换，隐藏文件也照常显示。点开一篇，右边就是排版好的预览；随手就能改，改完点"确定保存"才落盘，不点头也不担心误存。
+**3. 知识库目录**——侧栏底部的"笔记"页签是你所有长效知识库目录的入口：多个目录随时切换，隐藏文件也照常显示。点开一篇，右边就是排版好的预览；随手就能改，改完点"确定保存"才落盘，不点头也不担心误存。
 
 ![笔记功能](screenshots/notes.png)
 
@@ -24,20 +41,7 @@ DSH Web 极客侧栏：工作台侧栏 + 文件管理器/预览 + 技能管理 +
 
 ![skill 管理](screenshots/skills-modal.png)
 
-### 功能清单
-
-- **侧栏**：工作区选择/自定义路径、会话列表（运行/待交互圆点、重命名全选、删除/归档）、全局会话计数徽标（进行中/待交互，tooltip 拆解当前工作区）、blank（未发消息）会话不入列表、git worktree 一览/新建/删除
-- **文件管理器（项目/笔记）**：目录树、隐藏文件显示（仅屏蔽 .DS_Store）、上传/下载（目录打包 zip）、**删除至回收站**（行内二次确认，mac ~/.Trash · Linux XDG · Windows 应用级）、@提及到输入框、折叠时点 tab 自动展开
-- **文件预览**：多标签、Markdown（大纲/本地图片与**可点内链**——相对链接同面板链式跳转、外部链接新标签）、代码高亮、CSV、图片/PDF/docx（docx 仅 macOS）；**编辑模式**（"确定保存"才落盘）、窗口聚焦自动重读、手动刷新；窄窗口（<1220px）改右侧抽屉
-- **details 面板驱动管理器**：`dshDetailsPanels` 服务（register/open/close/isOpen），替换式弹出——驱动激活整体替换右栏，关闭回预览；外来裸注册插件（如 dsh-gtm）按 priority 轮值让位；点文件自动请当前占用者退场
-- **ACP 智能体面板**：底部面板多 tab 挂 Kimi Code 等 ACP 智能体（每 tab 一进程）——流式回复、权限请求确认、排队消息（turn 结束自动补发）、引导/后续消息、分叉会话、历史会话回放、上下文用量环（实时百分比）、`/compact` 压缩（跨轮次状态跟踪、压缩中可中止、压缩通知不污染对话流）；斜杠命令补全（内置+智能体通告）
-- **内嵌终端**：底部面板 PTY 终端（xterm.js），随会话目录、transcript 回放、多 tab
-- **消息操作**：ACP 回复悬停操作条（复制等），复制成功图标反馈
-- **助手弹层**：底栏按钮向上弹出的智能体列（ACP/A2A 占位），极简无头、高度自适应、宽度拖拽并 localStorage 记忆
-- **技能管理弹窗**：扫描 global/project 技能、frontmatter 开关（白名单限定 SKILL.md）、npx 安装/更新、skills.sh 搜索、GitHub trees + git fetch 兜底的版本比对、globalDir 偏好
-- **@文件提及桥**：`dshFileMention` 服务，经平台输入机 CAS 受管写入（防并发写冲突）
-- **安全护栏**：HTTP/WS 端点 Origin 同源校验；技能开关/文件写入白名单；PTY/ACP 进程配额
-- **工程**：纯 JS 单文件 client（`parts/` 可读源码按序拼接，`npm run build` 拼接器带构建期断言：顶层 return 居末校验 + 顶层符号重名检查）；host 路由 `/__dsh-geek-sidebar__/{skills,wb}/*` + terminal/acp 两条 WS；`Config` 可调参数（textMaxKB/rawMaxMB/writeMaxMB/notesMaxDirs/gitCacheTtlSec/terminalMaxPerSession/acpMaxSessions）；跨 macOS/Windows/Linux（选择器/回收站/zip/reveal/npx 按平台分支）；`npm test` = `parts/smoke.mjs` 88 项 host + client 断言
+**5. 便签与划选引用**——底栏一键打开全局便签抽屉，轻量随手记，不绑会话；在聊天记录中划选任意文本自动弹出气泡，可一键"存入便签"或生成智能紧凑小胶囊"引用到对话"（选中正文，长文本自动提取首尾词，输入框不刷屏，发送时完整展开交付模型）；每条便签与目录行上也有 @ 按钮：便签 @ 按该 `.md` 文件路径提成 @ 提及（与第 2 点的文件 @ 同机制），目录 @ 则把目录下全部便签各自按路径提成 @；支持随时一键将成熟便签转存至知识库，存储目录随心自定义。
 
 ---
 

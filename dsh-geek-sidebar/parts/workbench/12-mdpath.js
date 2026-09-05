@@ -6,11 +6,13 @@ function isExternalHref(s) {
 function resolveLocalPath(s, bd) {
   s = String(s || "").trim();
   if (!s || isExternalHref(s)) return null;
-  s = s.replace(/^\.\//, "");
-  if (s.slice(0, 2) === "~/") return s;
-  if (s.charAt(0) !== "/") {
+  s = s.replace(/^\.[\\/]/, "");
+  if (s.slice(0, 2) === "~/" || s.slice(0, 2) === "~\\") return s;
+  /* 绝对路径两种形态都认：POSIX /... 与 Windows 盘符（C:\... / C:/...），
+   * 否则 markdown 里写的 Windows 绝对路径会被误当相对路径拼到基目录后 */
+  if (s.charAt(0) !== "/" && !/^[A-Za-z]:[\\/]/.test(s)) {
     if (!bd) return null;
-    s = bd + "/" + s;
+    s = pathJoinFor(bd, s);
   }
   return s;
 }
@@ -20,6 +22,6 @@ function mediaUrl(s, bd) {
 }
 function openLocalPath(p) {
   try {
-    store.open(sessionProbe.sid, { path: p, name: p.split("/").pop() || p });
+    store.open(sessionProbe.sid, { path: p, name: baseName(p) || p });
   } catch (e) {}
 }

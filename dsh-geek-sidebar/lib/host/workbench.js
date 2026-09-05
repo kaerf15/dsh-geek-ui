@@ -11,20 +11,23 @@
  */
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { httpError } from './http.js'
 
 const CSS_URL = new URL('../style.css', import.meta.url)
-const VENDOR_XTERM_URL = new URL('../vendor-xterm.js', import.meta.url)
-let vendorXtermCache = null /* 静态内容读一次缓存（284KB，与 style.css 的每请求读盘不同——vendor 不随开发变动） */
 
 /* ---------- 跨平台（macOS / Windows / Linux） ---------- */
 const IS_WIN = process.platform === 'win32'
 const IS_MAC = process.platform === 'darwin'
-const q = (e) => "'" + String(e).replace(/'/g, "'\\''") + "'"
+/* q() 的单引号转义按执行 shell 分平台：POSIX sh 用 '\''（关引-转义-重开）；
+ * Windows 上 dsh 的 shell 服务走 pwsh -Command，PowerShell 单引号串里 apostrophe 用 doubling（''）。
+ * 混用会在含撇号路径（如 C:\Users\O'Brien\proj）上直接解析失败。 */
+const q = (e) => IS_WIN
+  ? "'" + String(e).replace(/'/g, "''") + "'"
+  : "'" + String(e).replace(/'/g, "'\\''") + "'"
 const dq = (s) => '"' + String(s).replace(/"/g, '\\"') + '"'
 const isAbs = (p) => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)
-const expandHome = (p) => (p.startsWith('~/') || p.startsWith('~\\') ? homedir() + p.slice(1) : p)
+const expandHome = (p) => (p === '~' ? homedir() : p.startsWith('~/') || p.startsWith('~\\') ? homedir() + p.slice(1) : p)
 const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ''
 
 /* 只读文件前 max 字节（替代 head -c） */
@@ -44,6 +47,75 @@ function trashDir() {
   if (IS_WIN) return join(homedir(), '.dsh', 'Trash')
   if (IS_MAC) return join(homedir(), '.Trash')
   return join(homedir(), '.local', 'share', 'Trash', 'files')
+}
+
+/* 统一移动：把 src 迁入 destDir（调用方保证 destDir 已存在且为目录）。
+ * 目标同名自动加时间戳后缀；rename 跨盘失败则 cpSync + rmSync 兜底。
+ * /wb/delete、/wb/move、/wb/qnDelete、/wb/qnMoveToKb、/wb/qnMoveToProject 共用，消除重复。 */
+function moveEntrySync(src, destDir) {
+  const name = baseName(src) || 'unnamed'
+  let dest = join(destDir, name)
+  if (existsSync(dest)) {
+    const dot = name.lastIndexOf('.')
+    dest = join(destDir, dot > 0 ? name.slice(0, dot) + '-' + Date.now() + name.slice(dot) : name + '-' + Date.now())
+  }
+  try {
+    renameSync(src, dest)
+  } catch {
+    cpSync(src, dest, { recursive: true })
+    rmSync(src, { recursive: true, force: true })
+  }
+  return dest
+}
+
+/* ---------- 会话持久化路径（对齐 @deepseek-ai/dsh-session-persistence-jsonl/format） ----------
+ * JSONL 会话后端把会话落在 <DSH_HOME>/sessions/<projectKey(cwd)>/<encodeSegment(id)>/；此处
+ * 逐字复刻该 format.ts 的 encodeSegment / projectKey（dsh 0.1.2-rc.1 锁定），供 /wb/sessionPath
+ * 计算“会话所在文件夹”的绝对路径（客户端复制后跳转/引用）。 */
+function encodeSegment(raw) {
+  if (raw.length === 0) throw new Error('cannot encode an empty path segment')
+  if (raw === '.') return '~002E'
+  if (raw === '..') return '~002E~002E'
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    out += ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch) ? ch : '~' + code.toString(16).toUpperCase().padStart(4, '0')
+  }
+  return out
+}
+function projectKey(cwd) {
+  if (cwd.length === 0) throw new Error('cannot encode an empty project path')
+  let readable = ''
+  let separatorRun = false
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-'
+      separatorRun = true
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch
+      separatorRun = false
+    } else {
+      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+      separatorRun = false
+    }
+  }
+  const slug = readable.replace(/^-+/, '') || 'root'
+  return '--' + slug.slice(0, 251) + '--'
+}
+/* 对齐 util/home-paths 的 resolveDshHome：$DSH_HOME（非空）优先，否则 ~/.dsh。 */
+function resolveDshHome() {
+  const env = process.env.DSH_HOME
+  const selected = env !== undefined && env.trim().length > 0 ? env : join(homedir(), '.dsh')
+  return resolve(expandHome(selected))
+}
+/* 会话所在文件夹的绝对路径；cwd 缺失时归入 _no-cwd 桶（与 projectDir 一致）。 */
+function sessionDirPath(cwd, id) {
+  const root = join(resolveDshHome(), 'sessions')
+  const proj = cwd == null || cwd === '' ? join(root, '_no-cwd') : join(root, projectKey(cwd))
+  return join(proj, encodeSegment(String(id)))
 }
 
 /* 文件夹选择器：macOS osascript / Windows PowerShell FolderBrowserDialog / Linux zenity */
@@ -98,7 +170,11 @@ export const WORKBENCH_DEFAULTS = {
   rawMaxMB: 20,         // /wb/raw 文件流上限
   writeMaxMB: 1,        // writeFile 写入上限
   notesMaxDirs: 8,      // 笔记目录历史上限
-  gitCacheTtlSec: 60,   // git 信息缓存
+  quickNotesDir: '',    // 便签目录固定覆盖（空 = 用户偏好或 ~/.dsh/quick-notes）
+  quickNotesCapture: true, // 划选采集气泡总开关（经 qnState 下发给 client）
+  quickNotesMax: 500,   // 便签目录扫描条数上限
+  qnPrefsFile: null,    // 便签目录偏好文件（默认 ~/.dsh/workbench-quicknotes.json；smoke 注入临时路径）
+  prefsFile: null,      // DirPicker 偏好文件（默认 ~/.dsh/workbench-prefs.json；smoke 注入临时路径）
 }
 
 export function workbenchApi(ctx, cfg) {
@@ -110,12 +186,19 @@ export function workbenchApi(ctx, cfg) {
   const stdoutOf = (e) => (e.stdout && e.stdout.text) || ''
   const errOf = (e) => ((e.stderr && e.stderr.text) || (e.stdout && e.stdout.text) || '').trim()
   const msgOf = (e) => String(e && e.message ? e.message : e)
-  const parentDir = (e) => {
-    const t = String(e).replace(/\/+$/, '')
-    const r = t.lastIndexOf('/')
-    return r <= 0 ? '/' : t.slice(0, r)
-  }
   const samePath = (a, b) => a === b || String(a).toLowerCase() === String(b).toLowerCase()
+  /* 跨平台父目录（唯一实现）：POSIX 根 / Windows 盘符根（C:\）的父为 null；尾分隔符先剥。
+   * git 路径与 /wb/listDir 的 DirPicker 面包屑共用——git 即使在 Windows 也输出正斜杠
+   * 绝对路径，两种分隔符全认是其超集；git 侧入参恒为非根绝对路径，与原 POSIX 版等价。 */
+  const parentOf = (p) => {
+    const t = String(p).replace(/[\\/]+$/, '')
+    if (!t || t === '/' || /^[A-Za-z]:$/.test(t)) return null
+    const i = Math.max(t.lastIndexOf('/'), t.lastIndexOf('\\'))
+    if (i < 0) return null
+    if (i === 0) return '/'
+    if (i === 2 && /^[A-Za-z]:/.test(t)) return t.slice(0, 3)
+    return t.slice(0, i)
+  }
 
   async function run(command, timeoutMs) {
     if (!shell) throw new Error('shell unavailable')
@@ -127,7 +210,7 @@ export function workbenchApi(ctx, cfg) {
       const o = errOf(r)
       throw new Error(o || 'git failed')
     }
-    return stdoutOf(r).trim()
+    return stdoutOf(r).trimEnd()
   }
   async function exists(p) {
     if (!fss) return true
@@ -180,7 +263,7 @@ export function workbenchApi(ctx, cfg) {
         const isTop = samePath(topLevel, real)
         const isWt = !samePath(gitDir, commonDir) && isTop
         info = {
-          root: isTop ? (isWt ? parentDir(commonDir) : topLevel) : p,
+          root: isTop ? (isWt ? parentOf(commonDir) : topLevel) : p,
           branch: branch && branch !== 'HEAD' ? branch : null,
           isWorktree: isWt,
           isTopLevel: isTop,
@@ -255,6 +338,103 @@ export function workbenchApi(ctx, cfg) {
     return cur
   }
 
+  /* ---------- 便签（quick notes）：平铺 .md 目录，全局池不绑会话 ----------
+   * 每条便签一个 .md 文件：标题即文件名，mtime 即更新时间，零元数据——agent 用
+   * 文件工具可直接读写（闭环红利），「转存知识库」就是跨目录 move。
+   * 目录三级来源：Config.quickNotesDir（部署固定） > 用户 UI 选择（qnPrefsFile 持久化） > 默认 ~/.dsh/quick-notes。
+   * 便签一律以 name（basename + .md 白名单）定位，host 不接受任何便签绝对路径。 */
+  const qnPrefsPath = () => C.qnPrefsFile || join(homedir(), '.dsh', 'workbench-quicknotes.json')
+  const qnDefaultDir = () => (C.quickNotesDir ? expandHome(C.quickNotesDir).replace(/[\\/]+$/, '') : join(homedir(), '.dsh', 'quick-notes'))
+  async function qnPrefsRead() {
+    try {
+      const j = JSON.parse(readFileSync(qnPrefsPath(), 'utf8'))
+      return { dir: j && j.dir ? String(j.dir) : null }
+    } catch {
+      return { dir: null }
+    }
+  }
+  /* 有效便签目录（纯计算，不建目录；建目录发生在 list/create 写路径） */
+  async function qnDir() {
+    const p = await qnPrefsRead()
+    return p.dir || qnDefaultDir()
+  }
+  /* name 白名单：纯 basename + .md 后缀，拒一切分隔符/父级跳跃 */
+  function qnSafeName(raw) {
+    const n = String(raw || '').trim()
+    if (!n || n !== baseName(n) || n === '.' || n === '..') return null
+    if (!/\.md$/i.test(n)) return null
+    return n
+  }
+  /* 标题 → 文件名主干：剥路径分隔符 / Windows 禁字 / 控制字符，截 48 字符；空回落「未命名便签」 */
+  function qnSlug(title) {
+    const s = String(title || '').replace(/[\u0000-\u001f\\/:*?"<>|]/g, '').trim().slice(0, 48)
+    return s || '未命名便签'
+  }
+  /* 目录内不重名的可用文件名：slug.md 被占则 slug-2.md、slug-3.md… */
+  function qnFreeName(dir, title) {
+    const base = qnSlug(title)
+    let name = base + '.md'
+    for (let i = 2; existsSync(join(dir, name)); i++) name = base + '-' + i + '.md'
+    return name
+  }
+  /* 首个非空行做列表预览（剥 markdown 标题记号，截 80 字符） */
+  function qnPreviewOf(text) {
+    const line = String(text).split('\n').find((l) => l.trim() !== '') || ''
+    const t = line.trim().replace(/^#+\s*/, '')
+    return t.length > 80 ? t.slice(0, 80) + '…' : t
+  }
+  async function qnListNotes(qRaw) {
+    const dir = await qnDir()
+    mkdirSync(dir, { recursive: true })
+    const query = String(qRaw || '').trim().toLowerCase()
+    const files = readdirSync(dir, { withFileTypes: true })
+      .filter((ent) => ent.isFile() && /\.md$/i.test(ent.name))
+      .slice(0, C.quickNotesMax)
+    const notes = []
+    for (const ent of files) {
+      const p = join(dir, ent.name)
+      let st
+      try { st = statSync(p) } catch { continue }
+      if (st.size > C.textMaxKB * 1024) continue
+      const text = readHeadSync(p, Math.min(st.size, 64 * 1024))
+      const title = ent.name.replace(/\.md$/i, '')
+      if (query && !(title.toLowerCase().includes(query) || text.toLowerCase().includes(query))) continue
+      notes.push({ name: ent.name, title, preview: qnPreviewOf(text), mtime: Math.round(st.mtimeMs), size: st.size })
+    }
+    notes.sort((a, b) => b.mtime - a.mtime)
+    return notes
+  }
+
+  /* ---------- DirPicker 默认打开目录偏好（1.19.12）：未自定义时回落桌面（无桌面再回落 home）。
+   * 与笔记偏好分文件：notes 是历史列表语义，prefs 是单向键值，混写会互相覆盖 ---------- */
+  const prefsPath = () => C.prefsFile || join(homedir(), '.dsh', 'workbench-prefs.json')
+  const desktopDir = () => {
+    const d = join(homedir(), 'Desktop')
+    try {
+      return statSync(d).isDirectory() ? d : homedir()
+    } catch {
+      return homedir()
+    }
+  }
+  async function prefsRead() {
+    try {
+      const j = JSON.parse(readFileSync(prefsPath(), 'utf8'))
+      return { pickerDir: j && j.pickerDir ? String(j.pickerDir) : null }
+    } catch {
+      return { pickerDir: null }
+    }
+  }
+  const prefsOut = async () => {
+    const j = await prefsRead()
+    /* 自愈合：自定义目录已被删/不可读时静默回落桌面，custom 跟随"生效值是否来自自定义" */
+    if (j.pickerDir) {
+      try {
+        if (statSync(j.pickerDir).isDirectory()) return { pickerDir: j.pickerDir, custom: true }
+      } catch { /* fall through */ }
+    }
+    return { pickerDir: desktopDir(), custom: false }
+  }
+
   return {
     /* ---------- git 项目映射 / worktree ---------- */
     'POST /wb/projectMap': async ({ body }) => {
@@ -301,7 +481,7 @@ export function workbenchApi(ctx, cfg) {
         const slug = raw.replace(/[\/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '')
         if (!slug) return { ok: false, error: '无效分支名：' + raw }
         const commonDir = await git(String(body.cwd || ''), ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-        const root = parentDir(commonDir)
+        const root = parentOf(commonDir)
         const base = root + '-worktrees'
         const dest = base + '/' + slug
         if (await exists(dest)) return { ok: false, error: '目录已存在：' + dest }
@@ -362,7 +542,11 @@ export function workbenchApi(ctx, cfg) {
     },
 
     'POST /wb/listDir': async ({ body }) => {
-      const p = String(body.path || '')
+      /* 空 path 默认 home（DirPicker 无初始路径时的落点）；响应带 path/parent——客户端
+       * 目录选择器不再自行拼父目录（Windows 盘符根等边界由 host 一处收口）。纯增字段，
+       * 旧调用方（03 文件树）只读 entries，行为不变。 */
+      const p0 = String((body && body.path) || '')
+      const p = p0 ? expandHome(p0) : homedir()
       if (fss) {
         try {
           const resolved = await fss.resolve(p)
@@ -378,7 +562,8 @@ export function workbenchApi(ctx, cfg) {
             })
           }
           rows.sort((a, b) => (a.type !== b.type ? (a.type === 'directory' ? -1 : 1) : a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-          return { entries: rows }
+          const abs = String(fss.processPath(resolved) || p)
+          return { path: abs, parent: parentOf(abs), entries: rows }
         } catch { /* fall through to shell */ }
       }
       /* node 兜底（fs 服务失败时；与主路同语义：目录优先、名称排序、hidden 标记） */
@@ -391,7 +576,7 @@ export function workbenchApi(ctx, cfg) {
           hidden: ent.name.charAt(0) === '.',
         }))
         rows.sort((a, b) => (a.type !== b.type ? (a.type === 'directory' ? -1 : 1) : a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-        return { entries: rows }
+        return { path: p, parent: parentOf(p), entries: rows }
       } catch (e) {
         return { entries: [], error: msgOf(e) }
       }
@@ -468,28 +653,51 @@ export function workbenchApi(ctx, cfg) {
       } catch {
         throw httpError(404, 'not found')
       }
-      /* 同名冲突时在扩展名前加时间戳后缀；rename 跨盘失败则复制后删 */
+      /* 移入回收站；同名冲突增加时间戳、跨盘 rename 兜底均由 moveEntrySync 处理 */
       const tdir = trashDir()
       mkdirSync(tdir, { recursive: true })
-      const base = baseName(p) || 'unnamed'
-      let destName = base
-      if (existsSync(join(tdir, destName))) {
-        const dot = base.lastIndexOf('.')
-        destName = dot > 0 ? base.slice(0, dot) + '-' + Date.now() + base.slice(dot) : base + '-' + Date.now()
+      return { ok: true, trash: baseName(moveEntrySync(p, tdir)) }
+    },
+
+    /* ---------- 移动（拖拽：把文件/文件夹挪到另一目录） ---------- */
+    'POST /wb/move': async ({ body }) => {
+      const src = expandHome(String((body && body.src) || '')).replace(/[\\/]+$/, '')
+      const destDir = expandHome(String((body && body.destDir) || '')).replace(/[\\/]+$/, '')
+      if (!src || !isAbs(src)) throw httpError(400, 'absolute src required')
+      if (!destDir || !isAbs(destDir)) throw httpError(400, 'absolute destDir required')
+      if (src === '/' || /^[A-Za-z]:\\?$/.test(src)) throw httpError(400, 'refusing to move filesystem root')
+      try { statSync(src) } catch { throw httpError(404, 'source not found') }
+      let dt
+      try { dt = statSync(destDir) } catch { return { ok: false, error: 'target not found' } }
+      if (!dt.isDirectory()) return { ok: false, error: 'target not a directory' }
+      /* 文件夹不可移进自身或其子孙（大小写不敏感跨平台校验） */
+      const isSameOrDescendant = (parent, child) => {
+        const P = String(parent).replace(/[\\/]+$/, '')
+        const C = String(child).replace(/[\\/]+$/, '')
+        return samePath(P, C) || C.toLowerCase().startsWith(P.toLowerCase() + '/') || C.toLowerCase().startsWith(P.toLowerCase() + '\\')
       }
-      try {
-        renameSync(p, join(tdir, destName))
-      } catch {
-        cpSync(p, join(tdir, destName), { recursive: true })
-        rmSync(p, { recursive: true, force: true })
-      }
-      return { ok: true, trash: destName }
+      if (isSameOrDescendant(src, destDir)) return { ok: false, error: 'cannot move a folder into itself or its subfolder' }
+      /* 同父目录拖放判 no-op（避免误加时间戳复制）；随后冲突/兜底统一交给 moveEntrySync */
+      const name = baseName(src)
+      if (samePath(join(destDir, name), src)) return { ok: false, error: 'already in this folder' }
+      const dest = moveEntrySync(src, destDir)
+      return { ok: true, path: dest, name: baseName(dest) }
+    },
+
+    /* ---------- 会话所在文件夹的绝对路径（复制给用户跳转/跨会话引用） ---------- */
+    'POST /wb/sessionPath': async ({ body }) => {
+      const id = String((body && body.id) || '')
+      if (!id) throw httpError(400, 'session id required')
+      const cwd = body && body.cwd ? String(body.cwd) : null
+      return { ok: true, path: sessionDirPath(cwd, id) }
     },
 
     'POST /wb/writeFile': async ({ body }) => {
       const p = expandHome(String(body.path || ''))
       if (!p || !isAbs(p)) throw httpError(400, 'absolute path required')
-      const text = typeof body.text === 'string' ? body.text : ''
+      /* text 缺字段必须拒绝——静默给 '' 会把目标文件清空（评审修复 B2） */
+      if (typeof body.text !== 'string') throw httpError(400, 'text (string) required')
+      const text = body.text
       const size = Buffer.byteLength(text, 'utf8')
       const writeMax = C.writeMaxMB * 1024 * 1024
       if (size > writeMax) throw httpError(413, 'text too large (>' + C.writeMaxMB + 'MB)')
@@ -511,7 +719,14 @@ export function workbenchApi(ctx, cfg) {
         const name = baseName(src) || 'download'
         const destDir0 = String(body.destDir || '') || join(homedir(), 'Downloads')
         mkdirSync(destDir0, { recursive: true })
-        const dest = join(destDir0, name)
+        /* 同名冲突加时间戳后缀（对齐 /wb/delete 的废纸篓冲突处理）——
+         * 原先 copyFileSync 直接覆盖 Downloads 里的同名文件（评审修复 B5） */
+        let dest = join(destDir0, name)
+        if (existsSync(dest)) {
+          const dot = name.lastIndexOf('.')
+          const stamped = dot > 0 ? name.slice(0, dot) + '-' + Date.now() + name.slice(dot) : name + '-' + Date.now()
+          dest = join(destDir0, stamped)
+        }
         copyFileSync(src, dest)
         return { ok: true, path: dest }
       } catch (e) {
@@ -537,6 +752,8 @@ export function workbenchApi(ctx, cfg) {
     /* ---------- 笔记目录 ---------- */
     'POST /wb/notesGet': async () => notesRead(),
 
+    /* 1.19.11 起客户端改走 /wb/listDir 驱动的应用内 DirPicker，不再调本路由；
+     * 保留给动态插件/外部调用（系统原生 GUI 选择器入口），非客户端兜底 */
     'POST /wb/notesPick': async () => {
       if (!shell) return { ok: false, error: 'shell unavailable' }
       const r = await run(pickFolderCmd('选择笔记目录'), 12e4)
@@ -557,6 +774,428 @@ export function workbenchApi(ctx, cfg) {
       return { ok: true, dirs: cur.dirs, current: cur.current }
     },
 
+    /* ---------- 便签（quick notes）路由组：全局 .md 平铺池 ----------
+     * 定位一律走 name 白名单（qnSafeName），不接受绝对路径；写上限复用 writeMaxMB。 */
+    'POST /wb/qnState': async () => {
+      const p = await qnPrefsRead()
+      return { ok: true, dir: await qnDir(), custom: !!p.dir, capture: C.quickNotesCapture !== false }
+    },
+
+    'POST /wb/qnList': async ({ body }) => {
+      const notes = await qnListNotes(body && body.q)
+      return { ok: true, dir: await qnDir(), notes }
+    },
+
+    'POST /wb/qnRead': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      const p = join(await qnDir(), name)
+      let st
+      try { st = statSync(p) } catch { throw httpError(404, 'not found') }
+      if (!st.isFile()) throw httpError(400, 'not a file')
+      const MAX = C.textMaxKB * 1024
+      return { ok: true, name, text: readHeadSync(p, MAX), truncated: st.size > MAX }
+    },
+
+    'POST /wb/qnCreate': async ({ body }) => {
+      const content = String((body && body.content) || '')
+      if (content.trim() === '') throw httpError(400, 'content required')
+      if (Buffer.byteLength(content, 'utf8') > C.writeMaxMB * 1024 * 1024) throw httpError(413, 'content too large (>' + C.writeMaxMB + 'MB)')
+      const dir = await qnDir()
+      mkdirSync(dir, { recursive: true })
+      const title = String((body && body.title) || '').trim() || qnPreviewOf(content).replace(/…$/, '')
+      const name = qnFreeName(dir, title)
+      writeFileSync(join(dir, name), content, 'utf8')
+      return { ok: true, name, title: name.replace(/\.md$/i, ''), dir }
+    },
+
+    'POST /wb/qnUpdate': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      /* content 缺字段必须拒绝——静默给 '' 会把便签清空（同 writeFile 的 B2 教训） */
+      if (typeof (body && body.content) !== 'string') throw httpError(400, 'content (string) required')
+      const content = body.content
+      if (content.trim() === '') throw httpError(400, 'content required')
+      if (Buffer.byteLength(content, 'utf8') > C.writeMaxMB * 1024 * 1024) throw httpError(413, 'content too large (>' + C.writeMaxMB + 'MB)')
+      const dir = await qnDir()
+      const p = join(dir, name)
+      try { if (!statSync(p).isFile()) throw new Error('not a file') } catch { throw httpError(404, 'not found') }
+      writeFileSync(p, content, 'utf8')
+      /* 可选改名：title 非空且与现文件名不同才动；冲突沿用 qnFreeName 序号后缀 */
+      const title = String((body && body.title) || '').trim()
+      if (title && title !== name.replace(/\.md$/i, '')) {
+        const next = qnFreeName(dir, title)
+        renameSync(p, join(dir, next))
+        return { ok: true, name: next, renamed: next !== name }
+      }
+      return { ok: true, name, renamed: false }
+    },
+
+    'POST /wb/qnGenTitle': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      let content = typeof (body && body.content) === 'string' ? body.content.trim() : ''
+      const dir = await qnDir()
+      if (!content && name) {
+        const p = join(dir, name)
+        try { content = readFileSync(p, 'utf8').trim() } catch {}
+      }
+      if (!content) throw httpError(400, '便签内容为空，无法生成标题')
+
+      let title = ''
+      /* llm 可选：ctx.get('llm') 判空（不声明 inject；ctx.llm 属性访问在未注入时会抛 cannot get property）。 */
+      const llm = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : null
+      const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : null
+      let session = null
+      const sid = String((body && body.sessionId) || '').trim()
+      if (sessions) {
+        session = sid ? sessions.get(sid) : (sessions.active || null)
+        if (!session && typeof sessions.list === 'function') {
+          const all = sessions.list()
+          if (all && all.length > 0) session = all[0]
+        }
+      }
+
+      let route = (body && body.provider && body.model)
+        ? { provider: body.provider, model: body.model }
+        : null
+
+      if (!route && session && typeof session.requestHeader === 'function') {
+        const header = session.requestHeader()
+        if (header && header.config && header.config.provider && header.config.model) {
+          route = { provider: header.config.provider, model: header.config.model }
+        }
+      }
+
+      if (!route && session && session.projectionValues && session.projectionValues.modelSelection) {
+        const sel = session.projectionValues.modelSelection
+        const cur = sel.next || sel.lastUsed
+        if (cur && cur.provider && cur.model) {
+          route = { provider: cur.provider, model: cur.model }
+        }
+      }
+
+      if (!route) {
+        throw httpError(409, '会话还没有可用的模型路由（请在对话中选择模型）')
+      }
+
+      if (llm && typeof llm.stream === 'function') {
+        const ask = {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `为以下便签内容生成一个简明扼要的标题。\n\n要求：\n- 语言与正文一致；\n- 提炼核心主题，不要带“便签”、“备忘”等冗余词；\n- 长度在 4 到 15 个字以内；\n- 不要调用工具；\n- 只返回标题纯文本，不要引号、符号、Markdown 或解释。\n\n便签内容：\n${content.slice(0, 3000)}`,
+            },
+          ],
+        }
+        let text = ''
+        let failure = null
+        try {
+          for await (const chunk of llm.stream({
+            provider: route.provider,
+            model: route.model,
+            messages: [ask],
+            maxTokens: 2048,
+            sessionId: session ? session.id : undefined,
+            purpose: 'note-title',
+            signal: AbortSignal.timeout(30000),
+          })) {
+            if (chunk.type === 'text-delta') text += chunk.text
+            else if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop') failure = chunk.reason
+          }
+        } catch (e) {
+          throw httpError(502, 'AI 模型调用失败: ' + (e.message || e))
+        }
+
+        if (failure) {
+          const detail = failure.kind === 'length'
+            ? 'length（模型思考占满输出上限，未产出标题）'
+            : failure.failure && failure.failure.message ? failure.failure.message : failure.kind
+          throw httpError(502, 'AI 标题生成中断: ' + String(detail))
+        }
+
+        title = text.split('\n').map(s => s.trim()).find(s => s.length > 0) || ''
+        title = title.replace(/^[\s"'“”「」『』`*#]+|[\s"'“”「」『』`*#.!。！?？:：;；]+$/g, '').slice(0, 40)
+      } else {
+        throw httpError(500, '宿主未加载 LLM 服务')
+      }
+
+      if (!title) {
+        throw httpError(502, 'AI 模型未能产出有效标题')
+      }
+
+      let newName = name
+      if (name && title) {
+        const p = join(dir, name)
+        if (existsSync(p)) {
+          newName = qnFreeName(dir, title)
+          if (newName !== name) {
+            renameSync(p, join(dir, newName))
+          }
+        }
+      }
+      return { ok: true, title, name: newName }
+    },
+
+    'POST /wb/qnDelete': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      const p = join(await qnDir(), name)
+      try { statSync(p) } catch { throw httpError(404, 'not found') }
+      /* 与 /wb/delete 同语义：进回收站（可恢复），冲突/兜底交给 moveEntrySync */
+      const tdir = trashDir()
+      mkdirSync(tdir, { recursive: true })
+      return { ok: true, trash: baseName(moveEntrySync(p, tdir)) }
+    },
+
+    'POST /wb/qnSetDir': async ({ body }) => {
+      const raw = String((body && body.dir) || '').trim()
+      let dir = null /* null = 清除自定义，回落 Config/默认 */
+      if (raw) {
+        dir = expandHome(raw).replace(/[\\/]+$/, '')
+        if (!isAbs(dir)) return { ok: false, error: 'absolute path required' }
+        try {
+          if (!statSync(dir).isDirectory()) return { ok: false, error: 'not a directory' }
+        } catch {
+          return { ok: false, error: 'not found' }
+        }
+      }
+      mkdirSync(dirname(qnPrefsPath()), { recursive: true })
+      writeFileSync(qnPrefsPath(), JSON.stringify({ dir }), 'utf8')
+      return { ok: true, dir: await qnDir(), custom: !!dir }
+    },
+
+    /* 转存知识库：目标目录必须登记在笔记目录偏好里——防止把文件挪进任意目录 */
+    'POST /wb/qnMoveToKb': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      const target = expandHome(String((body && body.targetDir) || '')).replace(/[\\/]+$/, '')
+      if (!target || !isAbs(target)) throw httpError(400, 'absolute targetDir required')
+      const kb = await notesRead()
+      if (!kb.dirs.some((d) => samePath(String(d).replace(/[\\/]+$/, ''), target))) return { ok: false, error: 'target not a registered knowledge-base dir' }
+      let tst
+      try { tst = statSync(target) } catch { return { ok: false, error: 'target not found' } }
+      if (!tst.isDirectory()) return { ok: false, error: 'target not a directory' }
+      const src = join(await qnDir(), name)
+      try { statSync(src) } catch { throw httpError(404, 'not found') }
+      const dest = moveEntrySync(src, target)
+      return { ok: true, path: dest }
+    },
+
+    /* 分流至当前项目：将便签转存至指定项目根目录 */
+    'POST /wb/qnMoveToProject': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      const target = expandHome(String((body && body.targetDir) || '')).replace(/[\\/]+$/, '')
+      if (!target || !isAbs(target)) throw httpError(400, 'absolute targetDir required')
+      let tst
+      try { tst = statSync(target) } catch { return { ok: false, error: 'target project dir not found' } }
+      if (!tst.isDirectory()) return { ok: false, error: 'target not a directory' }
+      const src = join(await qnDir(), name)
+      try { statSync(src) } catch { throw httpError(404, 'not found') }
+      const dest = moveEntrySync(src, target)
+      return { ok: true, path: dest }
+    },
+
+    /* 同步至指定目录（项目或知识库）：纯复制同步，绝不删除源便签 */
+    'POST /wb/qnSyncTo': async ({ body }) => {
+      const name = qnSafeName(body && body.name)
+      if (!name) throw httpError(400, 'invalid note name')
+      const target = expandHome(String((body && body.targetDir) || '')).replace(/[\\/]+$/, '')
+      if (!target || !isAbs(target)) throw httpError(400, 'absolute targetDir required')
+      let tst
+      try { tst = statSync(target) } catch { return { ok: false, error: 'target dir not found' } }
+      if (!tst.isDirectory()) return { ok: false, error: 'target not a directory' }
+      const src = join(await qnDir(), name)
+      try { statSync(src) } catch { throw httpError(404, 'not found') }
+      let dest = join(target, name)
+      copyFileSync(src, dest)
+      return { ok: true, path: dest }
+    },
+
+    /* ---------- 便签目录（分类）元数据读写 ---------- */
+    'POST /wb/qnFoldersGet': async () => {
+      const p = join(await qnDir(), '.folders.json')
+      try {
+        const j = JSON.parse(readFileSync(p, 'utf8'))
+        return {
+          ok: true,
+          folders: Array.isArray(j.folders) ? j.folders : [],
+          noteFolders: j.noteFolders && typeof j.noteFolders === 'object' ? j.noteFolders : {},
+        }
+      } catch {
+        return { ok: true, folders: [], noteFolders: {} }
+      }
+    },
+
+    'POST /wb/qnFoldersSet': async ({ body }) => {
+      const p = join(await qnDir(), '.folders.json')
+      const folders = Array.isArray(body && body.folders) ? body.folders.map(String).filter(Boolean) : []
+      const noteFolders = (body && body.noteFolders && typeof body.noteFolders === 'object') ? body.noteFolders : {}
+      try {
+        writeFileSync(p, JSON.stringify({ folders, noteFolders }, null, 2), 'utf8')
+        return { ok: true, folders, noteFolders }
+      } catch (e) {
+        return { ok: false, error: e.message || String(e) }
+      }
+    },
+
+    /* ---------- DirPicker 默认打开目录 ---------- */
+    'POST /wb/prefsGet': async () => prefsOut(),
+
+    'POST /wb/prefsSet': async ({ body }) => {
+      const raw = String((body && body.pickerDir) || '').trim()
+      let dir = null /* null = 清除自定义，回落桌面 */
+      if (raw) {
+        dir = expandHome(raw).replace(/[\\/]+$/, '')
+        if (!isAbs(dir)) return { ok: false, error: 'absolute path required' }
+        try {
+          if (!statSync(dir).isDirectory()) return { ok: false, error: 'not a directory' }
+        } catch {
+          return { ok: false, error: 'not found' }
+        }
+      }
+      mkdirSync(dirname(prefsPath()), { recursive: true })
+      writeFileSync(prefsPath(), JSON.stringify({ pickerDir: dir }), 'utf8')
+      const out = await prefsOut()
+      return { ok: true, pickerDir: out.pickerDir, custom: out.custom }
+    },
+
+    'POST /wb/gitStatus': async ({ body }) => {
+      const p = String((body && body.cwd) || '')
+      if (!p || !shell) return { root: null, files: {}, changedDirs: [], filesList: [], stats: { count: 0, additions: 0, deletions: 0 } }
+      try {
+        const root = (await git(p, ['rev-parse', '--show-toplevel'])).trim()
+        if (!root) return { root: null, files: {}, changedDirs: [], filesList: [], stats: { count: 0, additions: 0, deletions: 0 } }
+        const normRoot = root.endsWith('/') ? root.slice(0, -1) : root
+        const out = await git(root, ['-c', 'core.quotepath=false', 'status', '--porcelain', '-uall'])
+        const files = {}
+        const filesList = []
+        const dirSet = new Set()
+        for (const line of out.split('\n')) {
+          if (!line || line.length < 2) continue
+          let code = ''
+          let rel = ''
+          if (line.charAt(2) === ' ') {
+            code = line.slice(0, 2).trim()
+            rel = line.slice(3).trim()
+          } else if (line.charAt(1) === ' ') {
+            code = line.charAt(0)
+            rel = line.slice(2).trim()
+          } else {
+            code = line.slice(0, 2).trim()
+            rel = line.slice(3).trim()
+          }
+          if (rel.startsWith('"') && rel.endsWith('"')) {
+            try { rel = JSON.parse(rel) } catch (e) {}
+          }
+          const abs = normRoot + '/' + rel
+          const statusKind = code === '??' ? 'U' : code.includes('M') ? 'M' : code.includes('D') ? 'D' : code.includes('A') ? 'A' : 'M'
+          files[abs] = statusKind
+          filesList.push({
+            path: abs,
+            rel,
+            name: rel.slice(rel.lastIndexOf('/') + 1),
+            status: statusKind,
+          })
+          let cur = abs.slice(0, abs.lastIndexOf('/'))
+          while (cur && cur.length >= normRoot.length) {
+            dirSet.add(cur)
+            const idx = cur.lastIndexOf('/')
+            cur = idx > 0 ? cur.slice(0, idx) : ''
+          }
+        }
+        let additions = 0, deletions = 0
+        try {
+          const numstat = await git(root, ['-c', 'core.quotepath=false', 'diff', '--no-color', '--numstat', 'HEAD', '--', '.'])
+          for (const line of numstat.split('\n')) {
+            if (!line) continue
+            const parts = line.split('\t')
+            const a = parseInt(parts[0], 10), d = parseInt(parts[1], 10)
+            if (!isNaN(a)) additions += a
+            if (!isNaN(d)) deletions += d
+          }
+        } catch (e) {}
+        /* 对齐 pi-web：将未跟踪文本文件（??）的行数累加进 additions 中（字节级快检，零临时字符串与数组分配） */
+        let untrackedScanned = 0
+        for (const item of filesList) {
+          if (item.status === 'U') {
+            if (++untrackedScanned > 200) break /* 极端海量未跟踪文件时上限防御 */
+            try {
+              const st = statSync(item.path)
+              if (st.isFile() && st.size > 0 && st.size <= 512 * 1024) {
+                const buf = readFileSync(item.path)
+                let lines = 0, hasNull = false, lastByte = 0
+                for (let i = 0; i < buf.length; i++) {
+                  const b = buf[i]
+                  if (b === 0) { hasNull = true; break; }
+                  if (b === 10) lines++
+                  lastByte = b
+                }
+                if (!hasNull) {
+                  if (lastByte !== 10) lines++
+                  additions += lines
+                }
+              }
+            } catch (e) {}
+          }
+        }
+        return {
+          root,
+          files,
+          changedDirs: Array.from(dirSet),
+          filesList,
+          stats: { count: filesList.length, additions, deletions, untrackedIncluded: true },
+        }
+      } catch (err) {
+        return { root: null, files: {}, changedDirs: [], filesList: [], stats: { count: 0, additions: 0, deletions: 0 } }
+      }
+    },
+
+    'POST /wb/gitDiff': async ({ body }) => {
+      const p = String((body && body.path) || '')
+      if (!p || !shell) return { diff: '' }
+      try {
+        const dir = p.slice(0, p.lastIndexOf('/')) || p
+        const root = (await git(dir, ['rev-parse', '--show-toplevel'])).trim()
+        if (!root) return { diff: '' }
+        let diff = ''
+        try {
+          diff = await git(root, ['-c', 'core.quotepath=false', 'diff', '--no-color', 'HEAD', '--', p])
+        } catch (e) {}
+        if (!diff) {
+          try {
+            diff = await git(root, ['-c', 'core.quotepath=false', 'diff', '--no-color', '--', p])
+          } catch (e) {}
+        }
+        if (!diff && existsSync(p)) {
+          try {
+            const st = statSync(p)
+            if (st.isFile()) {
+              const normP = p.replace(/\\/g, '/')
+              const normRoot = root.replace(/\\/g, '/')
+              const rel = normP.startsWith(normRoot + '/') ? normP.slice(normRoot.length + 1) : normP
+              if (st.size > 512 * 1024) {
+                diff = 'Binary files /dev/null and b/' + rel + ' differ (file too large)'
+              } else {
+                const buf = readFileSync(p)
+                if (buf.includes(0)) {
+                  diff = 'Binary files /dev/null and b/' + rel + ' differ'
+                } else {
+                  const text = buf.toString('utf8')
+                  const lines = text.length === 0 ? [] : (text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n'))
+                  diff = '--- /dev/null\n+++ b/' + rel + '\n@@ -0,0 +1,' + lines.length + ' @@\n' + (lines.length ? lines.map(l => '+' + l).join('\n') : '')
+                }
+              }
+            }
+          } catch (e) {}
+        }
+        return { diff }
+      } catch (err) {
+        return { diff: '' }
+      }
+    },
+
     'POST /wb/reveal': async ({ body }) => {
       if (!shell) return { ok: false, error: 'shell unavailable' }
       const p = String((body && body.path) || '')
@@ -573,21 +1212,11 @@ export function workbenchApi(ctx, cfg) {
       } catch (e) {
         throw httpError(500, 'style.css unreadable: ' + msgOf(e))
       }
-      res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store' })
+      /* no-transform：0.1.2 平台 webserver 新增的 gzip 中间件在具名前缀路由的大响应上
+       * 会把连接压崩（空回复）。静态资源本就不该被中间件转换，按 compression 包
+       * 自带的 no-transform 旁路契约跳过压缩。 */
+      res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store, no-transform' })
       res.end(css)
-    },
-
-    /* ---------- xterm vendor（评审修复：从 client bundle 剥离，首开终端按需注入） ---------- */
-    'GET /wb/vendor-xterm.js': ({ res }) => {
-      if (!vendorXtermCache) {
-        try {
-          vendorXtermCache = readFileSync(VENDOR_XTERM_URL)
-        } catch (e) {
-          throw httpError(500, 'vendor-xterm.js unreadable: ' + msgOf(e))
-        }
-      }
-      res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(vendorXtermCache)
     },
 
     /* ---------- 原始文件流（md 预览的本地图片等资源） ---------- */
@@ -607,7 +1236,7 @@ export function workbenchApi(ctx, cfg) {
         png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
         pdf: 'application/pdf', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
       }[ext] || 'application/octet-stream'
-      res.writeHead(200, { 'content-type': mime, 'content-length': st.size, 'cache-control': 'private, max-age=60' })
+      res.writeHead(200, { 'content-type': mime, 'content-length': st.size, 'cache-control': 'private, max-age=60, no-transform' })
       /* 不用 createReadStream().pipe(res)：新版平台的 res 包装层不接受流式 pipe（连接空回复），
          raw 有 20MB 上限，缓冲读入一次性 end 即可（与 style.css 的 res.end 同路，已验证可用）。 */
       res.end(readFileSync(p))

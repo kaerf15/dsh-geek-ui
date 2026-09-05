@@ -6,19 +6,20 @@
  *
  * 路由命名空间：
  *   /__dsh-geek-sidebar__/skills/*      技能管理（扫描、开关、npx 安装/更新、skills.sh 搜索、prefs）
- *   /__dsh-geek-sidebar__/wb/*          workbench RPC（目录/文件/git worktree/笔记目录/上传下载）
+ *   /__dsh-geek-sidebar__/wb/*          workbench RPC（目录/文件/git worktree/笔记目录/便签/上传下载）
  *   /__dsh-geek-sidebar__/wb/style.css  workbench 样式（每请求读盘，改 CSS 刷新浏览器即生效）
  */
 import Schema from '@deepseek-ai/schemastery'
 import { mountApi } from './lib/host/http.js'
 import { skillsApi } from './lib/host/skills.js'
 import { workbenchApi, WORKBENCH_DEFAULTS } from './lib/host/workbench.js'
-import { createTerminalManager, mountTerminal } from './lib/host/terminal.js'
-import { createAcpManager, mountAcp } from './lib/host/acp.js'
 
 export const name = 'dsh-geek-sidebar'
 
-/* webServer 是硬依赖：没有它整个插件的 host 能力都不存在，静默降级无意义。 */
+/* webServer 是硬依赖；llm 为可选能力（便签智能生成标题），运行时经 ctx.get('llm') 判空降级。
+ * 脆弱点登记：本平台 cordis 的 inject 数组不支持 'llm?' 可选后缀——'llm?' 会按字面服务名
+ * 建 key 永远等待，entry 停在 pending，dsh boot 终审判 "entry did not activate" 使整个
+ * profile 启动失败（0.1.2-rc.1 实测）。可选服务一律 ctx.get() 判空，别写进 inject。 */
 export const inject = ['webServer']
 
 /* 可调参数（默认值与 WORKBENCH_DEFAULTS 同源）：部署时可在 profile 的 cordis.patch.yml 按行覆盖。 */
@@ -28,29 +29,13 @@ export const Config = Schema.object({
   writeMaxMB: Schema.number().default(WORKBENCH_DEFAULTS.writeMaxMB),
   notesMaxDirs: Schema.number().default(WORKBENCH_DEFAULTS.notesMaxDirs),
   gitCacheTtlSec: Schema.number().default(WORKBENCH_DEFAULTS.gitCacheTtlSec),
-  terminalMaxPerSession: Schema.number().default(4),
-  acpMaxSessions: Schema.number().default(8),
+  quickNotesDir: Schema.string().default(WORKBENCH_DEFAULTS.quickNotesDir),
+  quickNotesCapture: Schema.boolean().default(WORKBENCH_DEFAULTS.quickNotesCapture),
+  quickNotesMax: Schema.number().default(WORKBENCH_DEFAULTS.quickNotesMax),
 })
 
 export function apply(ctx, config) {
   const routes = Object.assign({}, skillsApi(), workbenchApi(ctx, config))
   mountApi(ctx, '/__dsh-geek-sidebar__', routes)
-  /* 终端：PTY 进程表 + WS 升级端点，随 Fiber 回收 */
-  const terminalMgr = createTerminalManager(config && config.terminalMaxPerSession)
-  /* ACP 智能体：agent 子进程注册表 + WS 转发（每个智能体 tab 一进程） */
-  const acpMgr = createAcpManager(config && config.acpMaxSessions)
-  ctx.effect(() => {
-    const disposeUpgrade = mountTerminal(ctx, terminalMgr)
-    const disposeAcp = mountAcp(ctx, acpMgr)
-    return () => {
-      try {
-        disposeUpgrade()
-        disposeAcp()
-      } finally {
-        terminalMgr.disposeAll()
-        acpMgr.disposeAll()
-      }
-    }
-  })
-  console.log('[dsh-geek-sidebar] api mounted at /__dsh-geek-sidebar__ (' + Object.keys(routes).length + ' routes) + terminal ws + acp ws')
+  console.log('[dsh-geek-sidebar] api mounted at /__dsh-geek-sidebar__ (' + Object.keys(routes).length + ' routes)')
 }

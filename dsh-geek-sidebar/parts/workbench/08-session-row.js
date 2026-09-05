@@ -16,6 +16,9 @@ function SessionRow(t) {
     p = React.useState(!1),
     C = p[0],
     I = p[1],
+    cpSt = React.useState(!1),
+    cp = cpSt[0],
+    setCp = cpSt[1],
     R = s.displayTitle || s.title || o,
     T = t.branch,
     H = (w) => {
@@ -43,6 +46,25 @@ function SessionRow(t) {
     },
     D = () => {
       u || y || (a && a.open(o));
+    },
+    /* 复制会话所在文件夹的绝对路径（host 按 dsh 会话持久化布局计算
+     * <DSH_HOME>/sessions/<projectKey>/<session-id>/）；升 transient “已复制”态。 */
+    z = (w) => {
+      w.stopPropagation();
+      if (cp) return;
+      host
+        .call("workbench.sessionPath", { id: o, cwd: s.cwd })
+        .then((res) => {
+          const text = res && res.ok && res.path ? res.path : null;
+          if (!text) return;
+          const done = () => {
+            setCp(!0), setTimeout(() => setCp(!1), 1200);
+          };
+          navigator.clipboard
+            ? navigator.clipboard.writeText(text).then(done, done)
+            : done();
+        })
+        .catch(() => {});
     };
   return y
     ? e(
@@ -110,6 +132,9 @@ function SessionRow(t) {
               s.pendingInteraction
                 ? e("span", { className: "pw-dot-warn" }, "●")
                 : null,
+              s.completed && !s.pendingInteraction
+                ? e("span", { className: "pw-dot-done" }, "●")
+                : null,
               T
                 ? e(
                     "span",
@@ -132,16 +157,25 @@ function SessionRow(t) {
             e(
               "button",
               {
-                className: "pw-act-btn danger",
-                title: "删除（Shift 跳过确认）",
-                onClick: A,
+                className: "pw-act-btn",
+                title: cp ? "已复制" : "复制会话绝对路径",
+                onClick: z,
               },
-              TrashIcon(13),
+              cp ? CheckIcon(13) : CopyIcon(13),
             ),
             e(
               "button",
               { className: "pw-act-btn", title: "归档会话", onClick: E },
               ArchiveIcon(13),
+            ),
+            e(
+              "button",
+              {
+                className: "pw-act-btn danger",
+                title: "删除（Shift 跳过确认）",
+                onClick: A,
+              },
+              TrashIcon(13),
             ),
           ),
         );

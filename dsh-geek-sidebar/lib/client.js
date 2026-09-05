@@ -1,9 +1,11 @@
 /**
  * dsh-geek-sidebar client 半（单文件：平台以 /plugins/dsh-geek-sidebar/client.js 直发浏览器，无打包器）。
- * 三个 feature 共用一个模块，apply 内逐个 try/catch 隔离，一个挂不影响其余：
- *   1. filemention — dshFileMention 服务 + conversation.input.left Tracker
- *   2. workbench   — 侧栏/文件预览/底栏（host.call("workbench.x") 由下方 shim 走 POST /__dsh-geek-sidebar__/wb/x）
+ * 五个 feature 共用一个模块，apply 内逐个 try/catch 隔离，一个挂不影响其余：
+ *   1. filemention — dshFileMention 服务（经 conversation.input 直读草稿态）
+ *   2. workbench   — 侧栏/文件预览（host.call("workbench.x") 由下方 shim 走 POST /__dsh-geek-sidebar__/wb/x）
  *   3. skills      — 技能管理弹窗 + dshSkillsUI 服务（路由 /__dsh-geek-sidebar__/skills/*）
+ *   4. deliv-hook  — chat 产出 chip/工具卡文件链接点击接管进应用内预览（见 15-deliv）
+ *   5. quicknotes  — 便签与划选引用（划选气泡/小胶囊/侧滑抽屉，路由 /__dsh-geek-sidebar__/wb/qn*）
  */
 window.__ModuleLoader__.load({
   id: 'dsh-geek-sidebar',
@@ -33,15 +35,20 @@ window.__ModuleLoader__.load({
     const host = { call: (name, args) => api('POST', '/wb/' + String(name).replace(/^workbench\./, ''), args || {}) }
 
     /* workbench 样式：<link> 直挂 host 路由（每请求读盘，改 style.css 刷新页面即生效）。
-     * 注：此挂载在 Fiber 回收体系之外——但静态插件 Fiber 生命周期 = 应用生命周期，
-     * 不会泄漏；这是有意为之的体系外单例（以 data- 属性幂等防重）。 */
+     * 若已存在 link 则检查 href，版本变动时更新 href 触发浏览器重拉样式，防止 HMR 漏样式变裸标签。 */
     function mountStyle(href) {
-      if (document.querySelector('link[data-dsh-geek-sidebar-style]')) return
-      const el = document.createElement('link')
-      el.rel = 'stylesheet'
-      el.href = href
-      el.setAttribute('data-dsh-geek-sidebar-style', '1')
-      document.head.appendChild(el)
+      const el = document.querySelector('link[data-dsh-geek-sidebar-style]')
+      if (el) {
+        if (el.getAttribute('href') !== href) {
+          el.setAttribute('href', href)
+        }
+        return
+      }
+      const newEl = document.createElement('link')
+      newEl.rel = 'stylesheet'
+      newEl.href = href
+      newEl.setAttribute('data-dsh-geek-sidebar-style', '1')
+      document.head.appendChild(newEl)
     }
 
     /* 技能弹窗实例句柄：SkillsModal 挂载后填充；workbench 底栏经 skillsUI 直接调用 */
@@ -60,50 +67,57 @@ window.__ModuleLoader__.load({
     }
 
     /* ============================ feature 1: filemention ============================
-     * dshFileMention：把 "@文件路径" 插入指定会话的输入框草稿。
-     * Tracker 挂在 conversation.input.left 槽（不渲染），持续缓存每个会话最新发布
-     * 的输入状态（draft / draftRev），mention() 用其构造 span 走平台输入机的受管
-     * 写入口 slash/input-insert-text（span 携带 draftRev 做 CAS，防并发写冲突）。
+     * dshFileMention：把 ReferenceInsert（mentionRef 构造）作为整体 chip 插入指定会话草稿末尾，
+     * 复用平台 slash/input-insert-reference 与 ui-reference 的 reference 源 codec（ref 即模型文本），
+     * 与输入框原生 @ 菜单一致：整块渲染、退格一次整块删除。
+     * 输入状态（draft / draftRev / occurrences）在点击时经 conversation.input（SessionInputResolver）
+     * 直读该会话的 InputState 快照；span 由 clipboard 草稿反推检测坐标（chip 展开收回 1 字符），
+     * 携带 draftRev 走受管写入口（CAS，防并发写冲突）。
+     * 0.1.2-alpha.4 起原「conversation.input.left 槽 Tracker 缓存」失效：InputBar 对该槽
+     * 只传空 props（渲染位点自 ConversationRoot 挪进 InputBar），槽组件拿不到 input。
+     * 钉住的平台私有面（平台升级先核对）：`conversation` 服务的 `input.for(actx)` 面、
+     * InputState 的 draft/draftRev/occurrences 字段、`slash/input-insert-reference` 请求形状
+     *（reference+span）。
      */
     function applyFilemention(ctx) {
-      /* sessionId -> 最新发布的输入状态 */
-      const latest = new Map()
-
-      function Tracker(props) {
-        const session = props.session
-        const sid = session && (session.sessionId || session.id)
-        useEffect(() => {
-          if (sid && props.input) latest.set(sid, props.input)
-        })
-        useEffect(() => () => { if (sid) latest.delete(sid) }, [sid])
-        return null
-      }
-
       ctx.provide('dshFileMention')
       fileMentionImpl = {
-        /* 把 text（如 "@docs/a.md "）追加到 sessionId 会话的草稿末尾。
-         * 返回 true = 插入被输入机接受；false = 无会话/无缓存/CAS 失败。 */
-        mention(sessionId, text) {
-          const st = latest.get(sessionId)
-          if (!st) return false
+        /* 把 reference（ReferenceInsert）追加到 sessionId 会话的草稿末尾。
+         * 返回 true = 插入被输入机接受；false = 无会话/输入面缺席/CAS 失败/span 不可映射。 */
+        mention(sessionId, reference) {
           const actx = ctx.sessions.scope(sessionId)
           if (!actx) return false
+          const conversation = ctx.get('conversation')
+          const resolver = conversation && conversation.input
+          if (!resolver) {
+            /* 服务在而输入面缺席 = 平台契约变动，与「会话不在线」的正常静默 false 不同，留痕 */
+            console.warn('[dsh-geek-sidebar] conversation.input 不可读，@提及不可用（平台契约变动？）')
+            return false
+          }
+          /* for() 只在会话 binding 未物化时 throw（该会话无可用输入机），吞掉等同不可提及 */
+          let st
+          try { st = resolver.for(actx).state.getSnapshot() } catch { return false }
+          if (!st) return false
+          /* span 是检测坐标（chip = 一个 ￼）：clipboard 草稿里每个已插入 chip 展开成其
+           * clipboardText，逐块收回 (length-1) 即得文档末的检测偏移——退格整块删除依赖精确落点。 */
           const draft = String(st.draft || '')
-          const span = { start: draft.length, end: draft.length, draftRev: st.draftRev }
-          return actx.bail(actx, 'slash/input-insert-text', { text: String(text), span }) === true
+          let detectEnd = draft.length
+          const occs = st.occurrences
+          if (Array.isArray(occs)) {
+            for (const occ of occs) detectEnd -= Math.max(0, (occ.length || 0) - 1)
+          }
+          const span = { start: detectEnd, end: detectEnd, draftRev: st.draftRev }
+          return actx.bail(actx, 'slash/input-insert-reference', { reference, span }) === true
         },
       }
       ctx.dshFileMention = fileMentionImpl
-
-      ctx.slots.inject('conversation.input.left', () =>
-        ctx.slots.register({ name: 'conversation.input.left', id: 'dsh-geek-sidebar-filemention' }, (props) => h(Tracker, props))
-      )
     }
 
     /* ============================ feature 2: workbench ============================ */
 const workbenchMod = (function (React, host) {
 /* workbench feature 维护源码（可读版）：侧栏（工作区/会话/git worktree）、文件管理器（项目/笔记）、
- * 文件预览（大纲/编辑/聚焦重读/手动刷新）、底栏（技能/助手入口）。
+ * 文件预览（大纲/编辑/聚焦重读/手动刷新）、底栏（技能/终端入口）、目录选择模态（DirPicker，
+ * 15-dirpicker.js：项目/笔记/终端 三处路径选择共用，复刻 pi-web DirectoryPicker 交互）。
  * 由 parts/build.mjs 与 head.js / skills.js / tail.js 拼接成 lib/client.js；改这里，别改产物。 */
 /* 评审修复：会话桶 LRU 上限——原先 buckets 只增不减，随会话数无界增长 */
 const STORE_MAX_BUCKETS = 50,
@@ -140,7 +154,14 @@ const STORE_MAX_BUCKETS = 50,
     open(t, e) {
       const s = store.bucket(t);
       /* 已打开也要激活 + fire——旧版 || 短路导致"重复点击已打开文件不切换"（评审 P2） */
-      if (!s.files.some((o) => o.path === e.path)) s.files = s.files.concat([e]);
+      const exIdx = s.files.findIndex((o) => o.path === e.path);
+      if (exIdx >= 0) {
+        const next = s.files.slice();
+        next[exIdx] = Object.assign({}, next[exIdx], { modeHint: e.modeHint });
+        s.files = next;
+      } else {
+        s.files = s.files.concat([e]);
+      }
       s.active = e.path;
       bus.fire();
     },
@@ -161,8 +182,8 @@ const STORE_MAX_BUCKETS = 50,
   bus = {
     fns: [],
     chans: {},
-    /* 频道语义（评审修复：热路径扇出拆分——原先单 bus，ACP 20fps 流式 chunk 把
-     * 侧栏树/详情 markdown 一起拖着重渲染）：
+    /* 频道语义（评审修复：热路径扇出拆分——热路径事件走专属频道，
+     * 避免把侧栏树/详情 markdown 等无关订阅者拖着重渲染）：
      *   fire()    全局 + 全部频道（稀有事件，兼容旧订阅，人人听得到）；
      *   fire(ch)  仅该频道（热路径专用：只有订阅该频道的视图重渲染） */
     fire(t) {
@@ -212,48 +233,41 @@ const STORE_MAX_BUCKETS = 50,
   imgZoomStore = createValueStore({ src: null }, (s, v) => {
     s.src = v || null;
   }),
-  /* 下侧边栏（助手面板）开态：open/tab/height。组件在 15-bottom-panel.js，
-   * store 必须放最前——渲染若早于后续文件求值会踩跨文件 TDZ（实战踩过）。 */
-  bottomPanel = {
-    open: false,
-    tab: "terminal",
-    height: (() => {
-      /* 非浏览器环境（smoke eval）无 window，兜底 360 */
-      try {
-        const w = typeof window !== "undefined" ? window : null;
-        const v = w && w.localStorage ? Number(w.localStorage.getItem("pw-bpanel-h")) : 0;
-        if (v >= 140 && v <= 900) return v;
-        if (w && w.innerHeight) return Math.max(180, Math.round(w.innerHeight * 0.42));
-      } catch (e) {}
-      return 360;
-    })(),
-    set(patch) {
-      Object.assign(bottomPanel, patch);
-      bus.fire();
+  /* 便签（quick notes）全局池 store：
+   * open: 面板开闭；height: 吸底抽屉高度；selected: 当前选中的便签 name；
+   * dir/custom: 当前目录与自定义标记；capture: 划选气泡总开关；
+   * notes: 便签列表（null=未加载）；q: 搜索词；editing: 编辑中的便签（null/对象）；
+   * confirm: 待确认删除的 name；kbPick: 待转存知识库的 name；toast: 提示消息。 */
+  qnStore = createValueStore(
+    {
+      open: false,
+      height: (() => {
+        try {
+          const w = typeof window !== "undefined" ? window : null;
+          const v = w && w.localStorage ? Number(w.localStorage.getItem("pw-qn-height")) : 0;
+          if (v >= 160 && v <= 2400) return v;
+          if (w && w.innerHeight) return Math.max(200, Math.min(480, Math.round(w.innerHeight * 0.36)));
+        } catch {}
+        return 300;
+      })(),
+      selected: null,
+      dir: '',
+      custom: false,
+      capture: true,
+      notes: null,
+      loading: false,
+      q: '',
+      folders: [],
+      noteFolders: {},
+      selectedFolder: null,
+      showFolders: true,
+      folderWidth: 160,
+      toast: null,
     },
-  },
-  /* 底部区域仲裁：第三方经 dshBottomPanels.acquire(id) 独占占位，占位期间我们的面板
-   * 让位（open 状态保留，release 后自动归位）——对齐右栏 details 的"它开我们让位、
-   * 它关我们归位"。右栏靠 single 槽 priority 天然仲裁；shell.overlay 是多槽无此语义，
-   * 故自建排他锁。面板组件在 15-bottom-panel.js，消费方 BottomPanel 渲染与挤压都读它。 */
-  bottomArea = {
-    owner: null,
-    acquire(t) {
-      if (!t || (bottomArea.owner && bottomArea.owner !== t)) return false;
-      if (bottomArea.owner === t) return true;
-      ((bottomArea.owner = t), bus.fire());
-      return true;
+    (s, v) => {
+      Object.assign(s, v);
     },
-    release(t) {
-      if (!bottomArea.owner) return false;
-      if (t !== undefined && bottomArea.owner !== t) return false;
-      ((bottomArea.owner = null), bus.fire());
-      return true;
-    },
-    isYielded() {
-      return !!bottomArea.owner;
-    },
-  };
+  );
 function useNotes() {
   const t = React.useState(0);
   return (
@@ -261,11 +275,30 @@ function useNotes() {
     { dirs: notesStore.dirs, current: notesStore.current }
   );
 }
+/* 路径字符串工具（分隔符兼容）：host 在 Windows 上回传反斜杠路径（C:\foo\bar），
+ * client 只按字符串处理——两种分隔符都认，且保持路径自身的分隔符风格。 */
 const baseName = (t) =>
   String(t || "")
-    .replace(/\/+$/, "")
-    .split("/")
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
     .pop() || "";
+/* 取父目录（字符串级）：'/a/b' → '/a'；'C:\a\b' → 'C:\a'；'/a' → '/'；'C:\a' → 'C:'。 */
+function pathDir(t) {
+  const s = String(t || "").replace(/[\\/]+$/, "");
+  const m = s.match(/^(.*)[\\/][^\\/]+$/);
+  if (!m) return "";
+  return m[1] || (s.startsWith("/") ? "/" : m[1]);
+}
+/* t 是否等于 prefix 或是其子孙（两种分隔符都认）。 */
+function pathHasPrefix(t, prefix) {
+  return t === prefix || t.startsWith(prefix + "/") || t.startsWith(prefix + "\\");
+}
+/* 按基准路径自身的分隔符风格拼接（展示/相对解析用）。 */
+function pathJoinFor(base, leaf) {
+  const s = String(base || "");
+  const sep = s.includes("\\") ? "\\" : "/";
+  return s.replace(/[\\/]+$/, "") + sep + leaf;
+}
 function useFilesTab() {
   const t = React.useState(filesTabStore.tab);
   return (
@@ -274,12 +307,13 @@ function useFilesTab() {
   );
 }
 const pickNotesDir = () => {
-    host
-      .call("workbench.notesPick", {})
+    /* 1.19.11 起换应用内 DirPicker（复刻 pi-web，见 15-dirpicker.js），不再调 host 的
+     * notesPick（osascript 原生对话框）；1.19.12 起落点走默认目录（桌面，星钮可自定）。
+     * 选出路径后复用 notesSelect 落库，语义不变 */
+    pickDir({ title: "选择知识库目录" })
       .then((t) => {
         t &&
-          t.ok &&
-          (notesStore.set(t),
+          (selectNotesDir(t),
           viewStore.set("main"),
           filesTabStore.set("notes"));
       })
@@ -323,7 +357,8 @@ function relTime(t) {
  * 注：PencilIcon 未一并收敛（skills 版 11px 固定 vs 本侧 13px 参数化），见 05-icons */
 function canonPath(t) {
   return String(t || "")
-    .replace(/\/+$/, "")
+    .replace(/[\\/]+$/, "")
+    .replace(/\\/g, "/")
     .toLowerCase();
 }
 /* 跨文件共享的工作区态：当前项目根（@提及/终端 cwd/技能弹窗用）与文件管理器展开偏好。
@@ -338,6 +373,27 @@ const setCurrentRootPath = (t) => {
 const isMd = (t) => /\.(md|markdown)$/i.test(t);
 /* 评审修复：bd（链接/图片解析基目录）显式传参——原经 12-mdpath 的模块级
  * var mdBaseDir 隐式传递，渲染期写共享态（并发/顺序敏感）。行为逐点保持 */
+/* 图片渲染走组件：失败态收进 React state（评审修复 N2）——原先 onError 直接
+ * parentNode.insertBefore 往 React 托管容器塞外来节点，markdown 重建时占位 span
+ * 无人回收、永久残留（图片修好了「加载失败」还在）。 */
+function MdImg(props) {
+  const [broken, setBroken] = React.useState(false);
+  if (broken)
+    return React.createElement(
+      "span",
+      { className: "pw-img-broken" },
+      "图片加载失败：" + (props.alt || props.raw),
+    );
+  return React.createElement("img", {
+    src: props.src,
+    alt: props.alt,
+    style: { maxWidth: "100%" },
+    onClick: (g) => {
+      (g.stopPropagation(), imgZoomStore.set(props.src));
+    },
+    onError: () => setBroken(true),
+  });
+}
 function mdInline(t, bd) {
   const e = [],
     s =
@@ -363,32 +419,24 @@ function mdInline(t, bd) {
     else if (c.startsWith("![")) {
       const u = c.match(/!\[([^\]]*)\]\(([^)]*)\)/);
       e.push(
-        React.createElement("img", {
+        React.createElement(MdImg, {
           key: l++,
           src: mediaUrl(u[2], bd),
           alt: u[1],
-          style: { maxWidth: "100%" },
-          onClick: (g) => {
-            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2], bd)));
-          },
-          onError: (g) => {
-            const t = g.currentTarget;
-            t.style.display = "none";
-            const ph = document.createElement("span");
-            ph.className = "pw-img-broken";
-            ph.textContent = "图片加载失败：" + (u[1] || u[2]);
-            t.parentNode && t.parentNode.insertBefore(ph, t);
-          },
+          raw: u[2],
         }),
       );
     } else if (c.startsWith("[")) {
       const u = c.match(/\[([^\]]*)\]\(([^)]*)\)/);
+      /* javascript:/vbscript: 协议拦截（评审修复 N3）：点击经 resolveLocalPath 已拦，
+       * 但 href 会原样落 DOM——中键/新标签打开场景收一道口。 */
+      const href = /^\s*(javascript|vbscript)\s*:/i.test(u[2]) ? "#" : u[2];
       e.push(
         React.createElement(
           "a",
           {
             key: l++,
-            href: u[2],
+            href: href,
             target: "_blank",
             rel: "noreferrer",
             onClick: (g) => {
@@ -576,6 +624,8 @@ function TreeNode(t) {
     u = o.children[e.path],
     r = !!o.loading[e.path],
     m = t.activePath === e.path,
+    gitStatus = !l && t.gitFiles ? t.gitFiles[e.path] : null,
+    containsGitChanges = l && t.gitDirs ? t.gitDirs.has(e.path) : false,
     h2 = useTwoClick(), /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id 用常量 1） */
     g2 = h2[0] === 1,
     C2 = (v) => (v ? h2[1](1) : h2[2]()),
@@ -586,22 +636,72 @@ function TreeNode(t) {
       a(
         "div",
         {
-          className: "pw-tree-row" + (m ? " active" : ""),
+          className:
+            "pw-tree-row" +
+            (m ? " active" : "") +
+            (t.dropTarget === e.path ? " drop-target" : "") +
+            (t.dragSrc && t.dragSrc.path === e.path ? " dragging" : ""),
           style: { paddingLeft: 8 + s * 14 + "px" },
+          draggable: true,
           onClick: () => t.onOpen(e),
+          onDragStart: (g) => t.onDragStart && t.onDragStart(e, g),
+          onDragEnd: (g) => t.onDragEnd && t.onDragEnd(g),
+          onDragOver: (g) => t.onDragOver && t.onDragOver(e, g),
+          onDragLeave: (g) => t.onDragLeave && t.onDragLeave(e, g),
+          onDrop: (g) => t.onDrop && t.onDrop(e, g),
         },
-        a(
-          "span",
-          { className: "pw-tree-arrow" },
-          l ? (c ? ChevronDown(11) : ChevronRight(11)) : "",
-        ),
+        l
+          ? a(
+              "span",
+              {
+                className: "pw-tree-arrow" + (c ? " open" : ""),
+              },
+              a(
+                "svg",
+                {
+                  width: 10,
+                  height: 10,
+                  viewBox: "0 0 10 10",
+                  fill: "none",
+                  stroke: "currentColor",
+                  strokeWidth: 1.8,
+                  strokeLinecap: "round",
+                  strokeLinejoin: "round",
+                  style: {
+                    transform: c ? "rotate(90deg)" : "none",
+                    transition: "transform 0.12s ease",
+                  },
+                },
+                a("polyline", { points: "3 2 7 5 3 8" }),
+              ),
+            )
+          : a("span", { className: "pw-tree-spacer" }),
         a(
           "span",
           { className: "pw-tree-icon" },
-          l ? FolderIcon(13) : fileIconEl(e.name, 13),
+          l ? FolderIcon(14, c) : fileIconEl(e.name, 14),
         ),
         a("span", { className: "pw-tree-name" }, e.name),
         r ? a("span", { className: "pw-tree-loading" }, "…") : null,
+        gitStatus
+          ? a(
+              "span",
+              {
+                className: "pw-tree-git-badge",
+                style: {
+                  color:
+                    gitStatus === "M"
+                      ? "#d6a84b"
+                      : gitStatus === "D"
+                        ? "#f87171"
+                        : "#4ade80",
+                },
+              },
+              gitStatus,
+            )
+          : containsGitChanges
+            ? a("span", { className: "pw-tree-git-dot", title: "包含变更文件" })
+            : null,
         t.onMention
           ? a(
               "button",
@@ -673,23 +773,41 @@ function TreeNode(t) {
       ),
     ];
   if (l && c && u) {
-    for (const g of u)
-      g.name === ".DS_Store" ||
-        h.push(
-          a(TreeNode, {
-            key: g.path,
-            entry: g,
-            depth: s + 1,
-            treeState: o,
-            onOpen: t.onOpen,
-            onDownload: t.onDownload,
-            dlBusy: t.dlBusy,
-            dlDone: t.dlDone,
-            onMention: t.onMention,
-            activePath: t.activePath,
-            onDelete: t.onDelete,
-          }),
-        );
+    for (const g of u) {
+      if (g.name === ".DS_Store") continue;
+      if (t.onlyChanges) {
+        const isD = g.type === "directory";
+        const hasChange = isD
+          ? t.gitDirs && t.gitDirs.has(g.path)
+          : t.gitFiles && t.gitFiles[g.path];
+        if (!hasChange) continue;
+      }
+      h.push(
+        a(TreeNode, {
+          key: g.path,
+          entry: g,
+          depth: s + 1,
+          treeState: o,
+          onOpen: t.onOpen,
+          onDownload: t.onDownload,
+          dlBusy: t.dlBusy,
+          dlDone: t.dlDone,
+          onMention: t.onMention,
+          activePath: t.activePath,
+          onDelete: t.onDelete,
+          gitFiles: t.gitFiles,
+          gitDirs: t.gitDirs,
+          onlyChanges: t.onlyChanges,
+          dragSrc: t.dragSrc,
+          dropTarget: t.dropTarget,
+          onDragStart: t.onDragStart,
+          onDragEnd: t.onDragEnd,
+          onDragOver: t.onDragOver,
+          onDragLeave: t.onDragLeave,
+          onDrop: t.onDrop,
+        }),
+      );
+    }
     u.length === 0 &&
       h.push(
         a(
@@ -706,6 +824,16 @@ function TreeNode(t) {
   return a(React.Fragment, null, h);
 }
 const OA = Object.assign;
+/* 从 treeState 摘除 path 及其子孙（children + expanded 两张图同步清空）；onDel / doMoveEntry 共用消除重复。 */
+function dropTreeSubtree(S, path) {
+  const v = OA({}, S.children);
+  delete v[path];
+  for (const F of Object.keys(v)) pathHasPrefix(F, path) && F !== path && delete v[F];
+  const X = OA({}, S.expanded);
+  delete X[path];
+  for (const F of Object.keys(X)) pathHasPrefix(F, path) && F !== path && delete X[F];
+  return OA({}, S, { children: v, expanded: X });
+}
 /* 打开文件预览前请右栏当前占用者退场：自家驱动经 panelStore.close() 正常归位；
  * 外来面板（如 GTM 抽屉，打开即注册 details、无外部关闭 API）则点它自带的 × 按钮，
  * 走它自己的清理路径（注销注册 + 关栏 + 复位开态），状态一致。选择器失效时静默退化为不轮换。 */
@@ -718,6 +846,48 @@ function yieldToPreview() {
     if (b) b.click();
   } catch (e) {}
 }
+function decodeGitPath(p) {
+  if (!p) return "";
+  let s = p;
+  if (s.endsWith("/GENTS.md")) {
+    s = s.slice(0, -9) + "/AGENTS.md";
+  } else if (s === "GENTS.md") {
+    s = "AGENTS.md";
+  }
+  if (s.startsWith('"') && s.endsWith('"')) {
+    s = s.slice(1, -1);
+  }
+  if (!s.includes("\\")) return s;
+  const bytes = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && i + 3 < s.length && /[0-7]{3}/.test(s.slice(i + 1, i + 4))) {
+      bytes.push(parseInt(s.slice(i + 1, i + 4), 8));
+      i += 3;
+    } else if (s[i] === "\\" && i + 1 < s.length) {
+      i++;
+      const c = s[i];
+      if (c === "n") bytes.push(10);
+      else if (c === "t") bytes.push(9);
+      else if (c === "r") bytes.push(13);
+      else if (c === "\\") bytes.push(92);
+      else if (c === '"') bytes.push(34);
+      else bytes.push(c.charCodeAt(0));
+    } else {
+      const code = s.charCodeAt(i);
+      if (code < 128) bytes.push(code);
+      else {
+        const enc = new TextEncoder().encode(s[i]);
+        for (const b of enc) bytes.push(b);
+      }
+    }
+  }
+  try {
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  } catch (e) {
+    return s;
+  }
+}
+
 function FileBrowser(t) {
   const e = React.createElement,
     o = (t.tab || "project") === "notes",
@@ -743,6 +913,108 @@ function FileBrowser(t) {
     A = React.useState(!1),
     E = A[0],
     D = A[1],
+    fltOpenState = React.useState(!1),
+    filterOpen = fltOpenState[0],
+    setFilterOpen = fltOpenState[1],
+    fltTextState = React.useState(""),
+    filterText = fltTextState[0],
+    setFilterText = fltTextState[1],
+    gitSt = React.useState({ files: {}, changedDirs: new Set(), filesList: [], stats: { count: 0, additions: 0, deletions: 0 } }),
+    gitInfo = gitSt[0],
+    setGitInfo = gitSt[1],
+    onlyChSt = React.useState(!1),
+    onlyChanges = onlyChSt[0],
+    setOnlyChanges = onlyChSt[1],
+    dragSt = React.useState(null),
+    dragSrc = dragSt[0],
+    setDragSrc = dragSt[1],
+    dropSt = React.useState(null),
+    dropPath = dropSt[0],
+    setDropPath = dropSt[1],
+    fetchGit = (targetPath) => {
+      if (!targetPath) return;
+      host
+        .call("workbench.gitStatus", { cwd: targetPath })
+        .then((res) => {
+          if (res && res.files) {
+            const rawFiles = res.files || {};
+            const healedFiles = {};
+            for (const k of Object.keys(rawFiles)) {
+              healedFiles[decodeGitPath(k)] = rawFiles[k];
+            }
+            const normRoot = (res.root || targetPath || "").replace(/\/+$/, "");
+            const list = (res.filesList && res.filesList.length > 0)
+              ? res.filesList.map((f) => ({
+                  path: decodeGitPath(f.path),
+                  rel: decodeGitPath(f.rel),
+                  name: decodeGitPath(f.name),
+                  status: f.status,
+                }))
+              : Object.keys(healedFiles).map((abs) => {
+                  const rel = abs.startsWith(normRoot + "/") ? abs.slice(normRoot.length + 1) : abs;
+                  const name = abs.slice(abs.lastIndexOf("/") + 1);
+                  return {
+                    path: abs,
+                    rel: rel,
+                    name: name,
+                    status: healedFiles[abs],
+                  };
+                });
+            setGitInfo({
+              files: healedFiles,
+              changedDirs: new Set((res.changedDirs || []).map(decodeGitPath)),
+              filesList: list,
+              stats: res.stats || { count: list.length, additions: 0, deletions: 0 },
+            });
+            /* 宿主进程未重启时的客户端自愈：异步累加未跟踪文本文件的行数对齐 pi-web */
+            if (res.stats && !res.stats.untrackedIncluded) {
+              const untracked = list.filter(
+                (f) =>
+                  f.status === "U" &&
+                  !f.name.endsWith(".png") &&
+                  !f.name.endsWith(".jpg") &&
+                  !f.name.endsWith(".svg") &&
+                  !f.name.endsWith(".zip") &&
+                  !f.name.endsWith(".tar") &&
+                  !f.name.endsWith(".gz"),
+              );
+              if (untracked.length > 0) {
+                Promise.all(
+                  untracked
+                    .slice(0, 100)
+                    .map((f) =>
+                      host
+                        .call("workbench.readFile", { path: f.path })
+                        .catch(() => null),
+                    ),
+                ).then((results) => {
+                  let extra = 0;
+                  for (const r of results) {
+                    if (r && r.kind === "text" && r.text) {
+                      const lines = r.text.endsWith("\n")
+                        ? r.text.slice(0, -1).split("\n").length
+                        : r.text.split("\n").length;
+                      extra += lines;
+                    }
+                  }
+                  if (extra > 0) {
+                    setGitInfo((prev) => ({
+                      files: prev.files,
+                      changedDirs: prev.changedDirs,
+                      filesList: prev.filesList,
+                      stats: OA({}, prev.stats, {
+                        additions: (prev.stats ? prev.stats.additions : 0) + extra,
+                        untrackedIncluded: !0,
+                      }),
+                    }));
+                  }
+                });
+              }
+            }
+          }
+        })
+        .catch(() => {});
+    },
     w = (i, N) => (
       k((S) => {
         if (!N && S.children[i]) return S;
@@ -770,7 +1042,7 @@ function FileBrowser(t) {
         })
     );
   React.useEffect(() => {
-    l && w(l);
+    l && (w(l), fetchGit(l));
   }, [l]);
   const j = (i) => {
       if (i.type === "directory") {
@@ -815,7 +1087,7 @@ function FileBrowser(t) {
       if (g) return;
       (C(!1), y(!0));
       const i = Object.keys(m.expanded).filter(
-        (v) => m.expanded[v] && l && (v === l || v.indexOf(l + "/") === 0),
+        (v) => m.expanded[v] && l && pathHasPrefix(v, l),
       );
       k((v) => ({
         expanded: v.expanded,
@@ -827,34 +1099,110 @@ function FileBrowser(t) {
       l && N.push(w(l, !0));
       for (const v of i) v !== l && N.push(w(v, !0));
       const S = () => {
-        (y(!1), flashDone(C));
+        (y(!1), flashDone(C), l && fetchGit(l));
       };
       /* Promise.all([]) 也会正常 resolve，无需对空数组再补一次（旧版 S 会跑两遍，评审 P3） */
       Promise.all(N).then(S, S);
     },
+    /* 焦点自动刷：外部（终端/Finder/agent）文件变动树感知不到，切回页面时静默重拉
+     * 已展开目录。节流 10s 防来回切窗抖动；手动刷新中（g）或面板收起（!c）时跳过。
+     * 手动刷新按钮保留，覆盖节流窗口内"立刻要看"的兜底需求。 */
+    treeAuto = () => {
+      const i = treeAutoRef.current;
+      if (i.busy || g || !c || !l || document.visibilityState !== "visible")
+        return;
+      const N = Date.now();
+      if (N - i.at < 1e4) return;
+      ((i.at = N), (i.busy = !0));
+      const S = Object.keys(m.expanded).filter(
+        (v) => m.expanded[v] && pathHasPrefix(v, l),
+      );
+      k((v) => ({
+        expanded: v.expanded,
+        children: {},
+        loading: {},
+        rev: v.rev + 1,
+      }));
+      const F = [w(l, !0)];
+      for (const v of S) v !== l && F.push(w(v, !0));
+      const X = () => {
+        (i.busy = !1, l && fetchGit(l));
+      };
+      Promise.all(F).then(X, X);
+    },
     onDel = (i) => {
       host
         .call("workbench.delete", { path: i.path })
-        .then((N) => {
-          if (!N || !N.ok) return;
-          const dir = i.path.replace(/\/[^/]*$/, "") || "/";
-          (k((S) => {
-            const v = OA({}, S.children);
-            delete v[i.path];
-            for (const F of Object.keys(v))
-              F.indexOf(i.path + "/") === 0 && delete v[F];
-            const X = OA({}, S.expanded);
-            return (delete X[i.path], OA({}, S, { children: v, expanded: X }));
-          }),
-            dir && w(dir, !0));
+        .then(() => {
+          const dir = pathDir(i.path) || "/";
+          (k((S) => dropTreeSubtree(S, i.path)),
+            dir && w(dir, !0),
+            l && fetchGit(l));
           const ab = store.bucket(t.sessionId);
           ab.active &&
-            (ab.active === i.path || ab.active.indexOf(i.path + "/") === 0) &&
+            pathHasPrefix(ab.active, i.path) &&
             store.close(t.sessionId, ab.active);
         })
         .catch((N) => {
           console.error("[dsh-geek-sidebar] delete failed", N);
         });
+    },
+    /* 拖拽移动：文件/文件夹可拖入另一目录。目标仅限目录，且排除自身/自身子孙/当前父目录。 */
+    canMoveEntry = (i, target) =>
+      !!i &&
+      !!target &&
+      target.type === "directory" &&
+      i.path !== target.path &&
+      pathDir(i.path) !== target.path &&
+      !(i.type === "directory" && pathHasPrefix(target.path, i.path)),
+    moveStart = (i, ev) => {
+      (setDragSrc(i), setDropPath(null));
+      if (ev && ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = "move";
+        try { ev.dataTransfer.setData("text/plain", i.path); } catch {}
+      }
+      if (ev) ev.stopPropagation();
+    },
+    moveEnd = () => {
+      (setDragSrc(null), setDropPath(null));
+    },
+    moveOver = (i, ev) => {
+      if (!canMoveEntry(dragSrc, i)) return;
+      (ev.preventDefault(), ev.stopPropagation());
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+      if (dropPath !== i.path) setDropPath(i.path);
+    },
+    moveLeave = (i, ev) => {
+      const node = ev.currentTarget;
+      const rel = ev.relatedTarget;
+      if (rel && node && node.contains && node.contains(rel)) return;
+      if (dropPath === i.path) setDropPath(null);
+    },
+    doMoveEntry = (src, target) => {
+      host
+        .call("workbench.move", { src: src.path, destDir: target.path })
+        .then(() => {
+          const srcDir = pathDir(src.path) || "/";
+          k((S) => dropTreeSubtree(S, src.path));
+          srcDir && w(srcDir, true);
+          if (m.children[target.path]) w(target.path, true);
+          l && fetchGit(l);
+          const ab = store.bucket(t.sessionId);
+          ab.active &&
+            pathHasPrefix(ab.active, src.path) &&
+            store.close(t.sessionId, ab.active);
+        })
+        .catch((err) => {
+          console.error("[dsh-geek-sidebar] move failed", err);
+        });
+    },
+    moveDrop = (i, ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const src = dragSrc;
+      setDropPath(null);
+      if (!canMoveEntry(src, i)) return;
+      doMoveEntry(src, i);
     },
     _ = l ? m.children[l] : null,
     q = o
@@ -863,11 +1211,11 @@ function FileBrowser(t) {
           { className: "pw-nsel" },
           e(
             "button",
-            { className: "pw-sel-btn", title: l || "选择笔记目录", onClick: () => D(!E) },
+            { className: "pw-sel-btn", title: l || "选择知识库目录", onClick: () => D(!E) },
             e(
               "span",
               { className: "pw-mono" + (l ? " pw-tail" : " dim") },
-              l ? "\u200e" + shortenPath(l) : "选择笔记目录…",
+              l ? "\u200e" + shortenPath(l) : "选择知识库目录…",
             ),
           ),
           E ? dropOverlayEl(() => D(!1)) : null,
@@ -904,6 +1252,36 @@ function FileBrowser(t) {
             : null,
         )
       : null;
+  /* treeAutoRef.fn 每 render 重指最新闭包，focus/visibilitychange 监听只注册一次 */
+  const treeAutoRef = React.useRef({ at: 0, busy: !1, fn: null });
+  ((treeAutoRef.current.fn = treeAuto),
+    React.useEffect(() => {
+      const i = () => treeAutoRef.current.fn && treeAutoRef.current.fn();
+      (window.addEventListener("focus", i),
+        document.addEventListener("visibilitychange", i));
+      return () => {
+        (window.removeEventListener("focus", i),
+          document.removeEventListener("visibilitychange", i));
+      };
+    }, []));
+  const fileKeys = Object.keys(gitInfo.files || {});
+  const normRoot = (l || "").replace(/\/+$/, "");
+  const activeChangesList = (gitInfo.filesList && gitInfo.filesList.length > 0)
+    ? gitInfo.filesList
+    : fileKeys.map((abs) => {
+        const cleanAbs = decodeGitPath(abs);
+        const rel = cleanAbs.startsWith(normRoot + "/") ? cleanAbs.slice(normRoot.length + 1) : cleanAbs;
+        const name = cleanAbs.slice(cleanAbs.lastIndexOf("/") + 1);
+        return {
+          path: cleanAbs,
+          rel: rel,
+          name: name,
+          status: gitInfo.files[abs],
+        };
+      });
+  const filteredChanges = filterText
+    ? activeChangesList.filter((f) => f.rel.toLowerCase().includes(filterText.toLowerCase()))
+    : activeChangesList;
   return e(
     "div",
     { className: "pw-files" + (c ? "" : " closed") },
@@ -940,12 +1318,37 @@ function FileBrowser(t) {
               (!c && u && u(!0), t.onTab && t.onTab("notes"));
             },
           },
-          "笔记",
+          "知识库",
         ),
       ),
       e(
         "span",
         { className: "pw-files-actions" },
+        l && Object.keys(gitInfo.files || {}).length > 0
+          ? e(
+              "button",
+              {
+                className: "pw-icon-btn" + (onlyChanges ? " on" : ""),
+                title: onlyChanges ? "显示全部文件" : `仅显示变更文件 (${Object.keys(gitInfo.files).length})`,
+                onClick: () => setOnlyChanges(!onlyChanges),
+              },
+              GitChangesIcon(13),
+            )
+          : null,
+        l
+          ? e(
+              "button",
+              {
+                className: "pw-icon-btn" + (filterOpen ? " on" : ""),
+                title: "过滤文件",
+                onClick: () => {
+                  setFilterOpen(!filterOpen);
+                  if (filterOpen) setFilterText("");
+                },
+              },
+              SearchIcon(13),
+            )
+          : null,
         l
           ? e(
               "button",
@@ -955,21 +1358,6 @@ function FileBrowser(t) {
                 onClick: K,
               },
               UploadIcon(13),
-            )
-          : null,
-        l && (o || t.workspaces)
-          ? e(
-              "button",
-              {
-                className: "pw-icon-btn",
-                title: "在系统中打开",
-                onClick: () => {
-                  o
-                    ? host.call("workbench.reveal", { path: l }).catch(() => {})
-                    : t.workspaces.openPath(l);
-                },
-              },
-              ExternalIcon(13),
             )
           : null,
         e(
@@ -984,31 +1372,160 @@ function FileBrowser(t) {
         ),
       ),
     ),
+    c && filterOpen
+      ? e(
+          "div",
+          { className: "pw-tree-search-wrap" },
+          e("input", {
+            className: "pw-tree-search-input",
+            placeholder: "过滤当前目录文件…",
+            value: filterText,
+            autoFocus: true,
+            onChange: (ev) => setFilterText(ev.target.value),
+            onKeyDown: (ev) => {
+              if (ev.key === "Escape") {
+                setFilterOpen(false);
+                setFilterText("");
+              }
+            },
+          }),
+          filterText
+            ? e(
+                "button",
+                {
+                  className: "pw-tree-search-clear",
+                  onClick: () => setFilterText(""),
+                },
+                "×",
+              )
+            : null,
+        )
+      : null,
     c ? q : null,
     c
       ? e(
           "div",
           { className: "pw-files-body" },
           o && !l
-            ? e("div", { className: "pw-hint" }, "从上方下拉选择或添加笔记目录")
+            ? e("div", { className: "pw-hint" }, "从上方下拉选择或添加知识库目录")
             : l
-              ? _
-                ? _.filter((i) => i.name !== ".DS_Store").map((i) =>
-                    e(TreeNode, {
-                      key: i.path,
-                      entry: i,
-                      depth: 0,
-                      treeState: m,
-                      onOpen: j,
-                      onDownload: z,
-                      dlBusy: R,
-                      dlDone: b,
-                      onMention: o ? t.onMentionAbs : t.onMention,
-                      activePath: store.bucket(t.sessionId).active,
-                      onDelete: onDel,
-                    }),
-                  )
-                : e("div", { className: "pw-hint" }, "加载中…")
+              ? onlyChanges
+                ? (activeChangesList && activeChangesList.length > 0)
+                  ? e(
+                      "div",
+                      { className: "pw-git-changes-wrap" },
+                      e(
+                        "div",
+                        { className: "pw-git-stats-bar" },
+                        e(
+                          "span",
+                          { className: "pw-git-stats-count" },
+                          filterText
+                            ? `${filteredChanges.length} / ${activeChangesList.length} 个文件`
+                            : `${activeChangesList.length} 个文件`,
+                        ),
+                        gitInfo.stats && gitInfo.stats.additions > 0
+                          ? e(
+                              "span",
+                              { className: "pw-git-stats-add" },
+                              `+${gitInfo.stats.additions}`,
+                            )
+                          : null,
+                        gitInfo.stats && gitInfo.stats.deletions > 0
+                          ? e(
+                              "span",
+                              { className: "pw-git-stats-del" },
+                              `-${gitInfo.stats.deletions}`,
+                            )
+                          : null,
+                      ),
+                      filteredChanges.length > 0
+                        ? filteredChanges.map((f) =>
+                            e(
+                              "div",
+                              {
+                                key: f.path,
+                                className:
+                                  "pw-change-row" +
+                                  (store.bucket(t.sessionId).active === f.path
+                                    ? " active"
+                                    : ""),
+                                title: f.path,
+                                onClick: () => {
+                                  yieldToPreview();
+                                  store.open(t.sessionId, {
+                                    path: f.path,
+                                    name: f.name,
+                                    modeHint: "diff",
+                                  });
+                                  t.layout && t.layout.openDetails();
+                                },
+                              },
+                              e(
+                                "span",
+                                {
+                                  className: "pw-change-badge",
+                                  style: {
+                                    color:
+                                      f.status === "M"
+                                        ? "#d6a84b"
+                                        : f.status === "D"
+                                          ? "#f87171"
+                                          : "#4ade80",
+                                  },
+                                },
+                                f.status === "A" ? "+" : f.status,
+                              ),
+                              e(
+                                "span",
+                                { className: "pw-tree-icon" },
+                                fileIconEl(f.name, 14),
+                              ),
+                              e("span", { className: "pw-change-rel" }, f.rel),
+                            ),
+                          )
+                        : e(
+                            "div",
+                            { className: "pw-hint", style: { padding: "8px 12px" } },
+                            "无匹配文件",
+                          ),
+                    )
+                  : e(
+                      "div",
+                      { className: "pw-hint", style: { padding: "12px 16px" } },
+                      "无变更文件",
+                    )
+              : _
+                  ? _.filter((i) => {
+                      if (i.name === ".DS_Store") return false;
+                      if (!filterText) return true;
+                      return i.name.toLowerCase().includes(filterText.toLowerCase());
+                    }).map((i) =>
+                      e(TreeNode, {
+                        key: i.path,
+                        entry: i,
+                        depth: 0,
+                        treeState: m,
+                        onOpen: j,
+                        onDownload: z,
+                        dlBusy: R,
+                        dlDone: b,
+                        onMention: o ? t.onMentionAbs : t.onMention,
+                        activePath: store.bucket(t.sessionId).active,
+                        onDelete: onDel,
+                        gitFiles: gitInfo.files,
+                        gitDirs: gitInfo.changedDirs,
+                        onlyChanges: false,
+                        dragSrc: dragSrc,
+                        dropTarget: dropPath,
+                        onDragStart: moveStart,
+                        onDragEnd: moveEnd,
+                        onDragOver: moveOver,
+                        onDragLeave: moveLeave,
+                        onDrop: moveDrop,
+                      }),
+                    )
+                  : e("div", { className: "pw-hint" }, "加载中…")
               : e("div", { className: "pw-hint" }, "无工作区"),
         )
       : null,
@@ -1016,8 +1533,7 @@ function FileBrowser(t) {
 }
 function FootBar(t) {
   const e = React.createElement;
-  /* 评审修复：删掉 useView()/useFilesTab() 两个"只为订阅、返回值从未使用"的废调用——
-   * 重渲染由下面这条 bus 订阅一肩挑（acp 徽标 / bottomPanel 开态全走 bus） */
+  /* 重渲染由这条 bus 订阅一肩挑（面板开态走 bus） */
   const [, force] = React.useState(0);
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   return t.wide === !1
@@ -1034,24 +1550,16 @@ function FootBar(t) {
           e("span", { className: "pw-foot-ic" }, LayersIcon(12)),
           "技能",
         ),
-        (() => {
-          /* 智能体聚合徽标：运行中（绿）/ 待交互（黄）数量，面板关着也能看见 */
-          const ac = acpTabs.counts();
-          return e(
-            "button",
-            {
-              className: "pw-foot-btn" + (bottomPanel.open ? " on" : ""),
-              title:
-                "助手：终端 / Kimi 智能体" +
-                (ac.total ? "（运行中 " + ac.run + " · 待交互 " + ac.wait + " · 共 " + ac.total + " 个）" : ""),
-              onClick: () => bottomPanel.set({ open: !bottomPanel.open }),
-            },
-            e("span", { className: "pw-foot-ic" }, BotIcon(12)),
-            "助手",
-            ac.run > 0 ? e("span", { className: "pw-foot-badge run", title: "运行中 " + ac.run }, String(ac.run)) : null,
-            ac.wait > 0 ? e("span", { className: "pw-foot-badge wait", title: "待交互 " + ac.wait }, String(ac.wait)) : null,
-          );
-        })(),
+        e(
+          "button",
+          {
+            className: "pw-foot-btn" + (qnStore.open ? " on" : ""),
+            title: "便签：全局随手记，划选可一键存档/引用到对话",
+            onClick: () => qnStore.set({ open: !qnStore.open }),
+          },
+          e("span", { className: "pw-foot-ic" }, NotebookIcon(12)),
+          "便签",
+        ),
       );
 }
 
@@ -1126,15 +1634,64 @@ function ArchiveIcon(t) {
     t,
   );
 }
-function FolderIcon(t) {
+function FolderIcon(t, open) {
+  const e = t || 14;
+  return React.createElement(
+    "svg",
+    {
+      width: e,
+      height: e,
+      viewBox: "0 0 16 16",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.25,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      style: { verticalAlign: "middle", flexShrink: 0 },
+    },
+    React.createElement("path", {
+      d: open
+        ? "m1.87 8 .7-2.74a1 1 0 01.96-.76h10.94a1 1 0 01.97 1.24l-1.75 7a1 1 0 01-.97.76H2A1.5 1.5 0 01.5 12V3.5a1 1 0 011-1h5a1 1 0 011 1v1"
+        : "M4.5 4.5H12c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5H2A1.5 1.5 0 01.5 12V3.5a1 1 0 011-1h5a1 1 0 011 1v1",
+    }),
+  );
+}
+function SearchIcon(t) {
   return ic(
     [
-      [
-        "p",
-        "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z",
-      ],
+      ["c", 11, 11, 7],
+      ["l", 21, 21, 16.65, 16.65],
     ],
     t,
+  );
+}
+function PlusIcon(t) {
+  return ic(
+    [
+      ["l", 12, 5, 12, 19],
+      ["l", 5, 12, 19, 12],
+    ],
+    t,
+  );
+}
+function GitChangesIcon(t) {
+  const e = t || 13;
+  return React.createElement(
+    "svg",
+    {
+      width: e,
+      height: e,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 2,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      style: { verticalAlign: "middle", flexShrink: 0 },
+    },
+    React.createElement("circle", { cx: 12, cy: 12, r: 3 }),
+    React.createElement("path", { d: "M3 12h6" }),
+    React.createElement("path", { d: "M15 12h6" }),
   );
 }
 function FileIcon(t) {
@@ -1334,16 +1891,33 @@ const sessionProbe = {
     return bus.sub(t);
   },
 };
-function mentionPath(t, e) {
-  const s = currentRootPath;
-  return (
-    "@" +
-    (s && t.indexOf(s + "/") === 0 ? t.slice(s.length + 1) : t) +
-    (e ? "/ " : " ")
-  );
+/* 当前会话 cwd（chat 文件点击接管反解相对路径用）；09-sidebar 的会话订阅效应同步写 */
+const sessionCwd = { sid: null, cwd: null };
+/* @提及引用块（ReferenceInsert，原生 chip 路径）：与输入框原生 @ 菜单一致——把选中文件
+ * 插成整体 chip，退格一次整块删除。ref/clipboardText 用原生 formatFileMention 同款引号规则
+ *（含空格路径 `@"..."`；目录保持开引号以续补）。相对路径逻辑与旧 mentionPath 一致：
+ * 位于当前项目根下时取相对路径，否则取绝对路径；opts.abs 强制绝对路径（知识库分栏用）。 */
+function mentionRef(t, e, opts) {
+  const abs = !!(opts && opts.abs);
+  let shown = t;
+  if (!abs) {
+    const s = currentRootPath;
+    if (s && t !== s && pathHasPrefix(t, s)) shown = t.slice(s.length + 1);
+  }
+  const dir = e === true;
+  const at = dir ? shown + "/" : shown;
+  const q = /\s/u.test(at);
+  const mention = q ? (dir ? '@"' + at : '@"' + at + '"') : "@" + at;
+  return {
+    source: "reference",
+    ref: mention,
+    label: baseName(t) + (dir ? "/" : ""),
+    appearance: dir ? "folder" : "file",
+    clipboardText: mention,
+  };
 }
-/* 评审修复：两击确认状态机——原 03 树删除 / 08 归档 / 09 worktree / 15-acp 历史
- * 四处各抄一份 useState。返回 [armedId, ask(id), cancel()]；布尔场景用常量 id（如 1）。
+/* 评审修复：两击确认状态机——原 03 树删除 / 08 归档 / 09 worktree 等
+ * 多处各抄一份 useState。返回 [armedId, ask(id), cancel()]；布尔场景用常量 id（如 1）。
  * 各调用点以适配器保持原签名（is(id) === (armed === id)），行为逐点不变 */
 function useTwoClick() {
   const t = React.useState(null);
@@ -1543,33 +2117,156 @@ function CsvView(t) {
     ),
   );
 }
-function fileIconEl(t, e) {
-  const s = (t.split(".").pop() || "").toLowerCase(),
-    o = e || 13;
-  return s === "md" || s === "markdown" || s === "txt"
-    ? FileTextIcon(o)
-    : ["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(s) >= 0
-      ? ImageIcon(o)
-      : [
-            "js",
-            "ts",
-            "jsx",
-            "tsx",
-            "mjs",
-            "cjs",
-            "py",
-            "sh",
-            "go",
-            "rs",
-            "java",
-            "rb",
-          ].indexOf(s) >= 0
-        ? CodeIcon(o)
-        : s === "json" || s === "yml" || s === "yaml" || s === "toml"
-          ? BracesIcon(o)
-          : ["html", "css", "vue"].indexOf(s) >= 0
-            ? GlobeIcon(o)
-            : FileIcon(o);
+function fileIconEl(name, size) {
+  const sz = size || 14;
+  const n = String(name || "").toLowerCase();
+  const ext = n.split(".").pop() || "";
+  const el = React.createElement;
+  const svgWrap = (paths, strokeWidth) =>
+    el(
+      "svg",
+      {
+        width: sz,
+        height: sz,
+        viewBox: "0 0 16 16",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: strokeWidth || 1.25,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        style: { verticalAlign: "middle", flexShrink: 0 },
+      },
+      paths,
+    );
+
+  if (n === "dockerfile" || n.startsWith("dockerfile.")) {
+    return svgWrap([
+      el("path", { key: 1, d: "M.5 8.5H11l.75-.5a5.35 5.35 0 010-3.5c1 .6 1 1.88 1.74 2 .77-.09 1.23.01 2 .52 0 0-.97 1.77-2.5 1.98-1.93 3.65-4.5 5.5-6.98 5.5C0 14.5.5 8.5.5 8.5m1 0v-2m0 0h8m-6 2v-4m0 0h4m-2-2h2m-2 6v-6m2 6v-6m2 6v-2" }),
+    ]);
+  }
+  if (n === ".gitignore" || n === ".gitmodules" || n === ".gitattributes") {
+    return svgWrap([
+      el("path", { key: 1, d: "M8.5 10.5a1 1 0 01-1 1 1 1 0 01-1-1 1 1 0 011-1 1 1 0 011 1m0-6a1 1 0 01-1 1 1 1 0 01-1-1 1 1 0 011-1 1 1 0 011 1m3 3a1 1 0 01-1 1 1 1 0 01-1-1 1 1 0 011-1 1 1 0 011 1m-4-2v4m-1-6-1-1m4 4-1-1" }),
+      el("path", { key: 2, d: "m9.06 1.06 5.88 5.88a1.5 1.5 0 010 2.12l-5.88 5.88a1.5 1.5 0 01-2.12 0L1.06 9.06a1.5 1.5 0 010-2.12l5.88-5.88a1.5 1.5 0 012.12 0" }),
+    ]);
+  }
+  if (n === "package-lock.json") {
+    return svgWrap([
+      el("path", { key: 1, d: "M15 11.5c.27 0 .5.22.5.5v3a.5.5 0 01-.5.5h-5a.5.5 0 01-.5-.5v-3c0-.28.22-.5.5-.5zm-4 0V10a1.5 1.5 0 013 0v1.5" }),
+      el("path", { key: 2, d: "M9.5 9V5.5h-2v6h-4v-8h8v3" }),
+      el("path", { key: 3, d: "M7.54 13.5H3A1.5 1.5 0 011.5 12V3c0-.83.67-1.5 1.5-1.5h9c.83 0 1.5.67 1.5 1.5v3.5" }),
+    ]);
+  }
+  if (n === "bun.lock" || n === "yarn.lock" || n === "pnpm-lock.yaml" || n === "cargo.lock" || ext === "lock") {
+    return svgWrap([
+      el("path", { key: 1, d: "m12.36 7.104c0.4817 0 0.8722 0.3903 0.8722 0.8717v5.23c0 0.4814-0.3905 0.8717-0.8722 0.8717h-8.721c-0.4817 0-0.8722-0.3903-0.8722-0.8717v-5.23c0-0.4814 0.3905-0.8717 0.8722-0.8717zm-6.977 0v-2.616c0-1.445 1.172-2.616 2.617-2.616 1.445 0 2.617 1.171 2.617 2.616v2.616" }),
+    ]);
+  }
+  if (n.endsWith(".config.ts") || n.endsWith(".config.js") || n.endsWith(".config.mjs") || n.endsWith(".config.cjs")) {
+    return svgWrap([
+      el("path", { key: 1, d: "m7.997 9.694a1.726 1.695 0 1 0 0-3.39 1.726 1.695 0 0 0 0 3.39m3.021-6.78 3.021 5.085-3.021 5.085h-6.042l-3.021-5.085 3.021-5.085z" }),
+    ]);
+  }
+  if (n === ".env" || n.startsWith(".env.")) {
+    return svgWrap([
+      el("path", { key: 1, d: "M5.5 8.5V12m0-6.5V4m0 4.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3m5 3.5v-1.5m0-3V4m0 6.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4 1.5h8A2.5 2.5 0 0114.5 4v8a2.5 2.5 0 01-2.5 2.5H4A2.5 2.5 0 011.5 12V4A2.5 2.5 0 014 1.5" }),
+    ]);
+  }
+  if (ext === "ts" || ext === "tsx") {
+    return svgWrap([
+      el("path", { key: 1, d: "M4 1.5h8A2.5 2.5 0 0114.5 4v8a2.5 2.5 0 01-2.5 2.5H4A2.5 2.5 0 011.5 12V4A2.5 2.5 0 014 1.5" }),
+      el("path", { key: 2, d: "M12.5 8.75c0-.69-.54-1.25-1.2-1.25h-.6c-.66 0-1.2.56-1.2 1.25S10.04 10 10.7 10h.6c.66 0 1.2.56 1.2 1.25s-.54 1.25-1.2 1.25h-.6c-.66 0-1.2-.56-1.2-1.25m-3-3.75v5M5 7.5h3" }),
+    ]);
+  }
+  if (ext === "js" || ext === "jsx" || ext === "mjs" || ext === "cjs") {
+    return svgWrap([
+      el("path", { key: 1, d: "m 4,1.5 h 8 c 1.385,0 2.5,1.115 2.5,2.5 v 8 c 0,1.385 -1.115,2.5 -2.5,2.5 H 4 C 2.615,14.5 1.5,13.385 1.5,12 V 4 C 1.5,2.615 2.615,1.5 4,1.5 Z" }),
+      el("path", { key: 2, d: "M4.5 11c0 .828.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V7.5M12.5 8.75c0-.69-.54-1.25-1.2-1.25h-.6c-.66 0-1.2.56-1.2 1.25s.54 1.25 1.2 1.25h.6c.66 0 1.2.56 1.2 1.25s-.54 1.25-1.2 1.25h-.6c-.66 0-1.2-.56-1.2-1.25" }),
+    ]);
+  }
+  if (ext === "md" || ext === "mdx" || ext === "markdown") {
+    return svgWrap([
+      el("path", { key: 1, d: "m9.25 8.25 2.25 2.25 2.25-2.25M3.5 11V5.5l2.04 3 1.96-3V11m4-.5V5M1.65 2.5h12.7c.59 0 1.15.49 1.15 1v9c0 .51-.56 1-1.15 1H1.65c-.59 0-1.15-.49-1.15-1V3.58c0-.5.56-1.08 1.15-1.08" }),
+    ]);
+  }
+  if (ext === "py") {
+    return svgWrap([
+      el("path", { key: 1, d: "M8.5 5.5h-3m6 0V3c0-.8-.7-1.5-1.5-1.5H7c-.8 0-1.5.7-1.5 1.5v2.5H3c-.8 0-1.5.7-1.5 1.5v2c0 .8.7 1.5 1.48 1.5" }),
+      el("path", { key: 2, d: "M10.5 10.5h-3m-3 0V13c0 .8.7 1.5 1.5 1.5h3c.8 0 1.5-.7 1.5-1.5v-2.5H13c.8 0 1.5-.7 1.5-1.5V7c0-.8-.7-1.5-1.48-1.5H11.5c0 1.5 0 2-1 2h-2" }),
+    ]);
+  }
+  if (ext === "json" || ext === "jsonl") {
+    return svgWrap([
+      el("path", { key: 1, d: "M4.5 2.5H4c-.75 0-1.5.75-1.5 1.5v2c0 1.1-1 2-1.83 2 .83 0 1.83.9 1.83 2v2c0 .75.75 1.5 1.5 1.5h.5m7-11h.5c.75 0 1.5.75 1.5 1.5v2c0 1.1 1 2 1.83 2-.83 0-1.83.9-1.83 2v2c0 .74-.75 1.5-1.5 1.5h-.5m-6.5-3a.5.5 0 100-1 .5.5 0 000 1m3 0a.5.5 0 100-1 .5.5 0 000 1m3 0a.5.5 0 100-1 .5.5 0 000 1" }),
+    ]);
+  }
+  if (ext === "yaml" || ext === "yml") {
+    return svgWrap([
+      el("path", { key: 1, d: "M2.5 1.5h3l3 4 3-4h3l-9 13h-3L7 8z" }),
+    ]);
+  }
+  if (ext === "toml") {
+    return svgWrap([
+      el("path", { key: 1, d: "M3.5 1.5h-2v13h2m9-13h2v13h-2m-8-11h7v3h-2v6h-3v-6h-2z" }),
+    ]);
+  }
+  if (ext === "css" || ext === "less") {
+    return svgWrap([
+      el("path", { key: 1, d: "m4 1.5h8c1.38 0 2.5 1.12 2.5 2.5v8c0 1.38-1.12 2.5-2.5 2.5h-8c-1.38 0-2.5-1.12-2.5-2.5v-8c0-1.38 1.12-2.5 2.5-2.5z" }),
+      el("path", { key: 2, d: "M5 5.5h6M5 8h5.5l-.5 3-2 1-2-1-.2-1.5" }),
+    ]);
+  }
+  if (ext === "scss" || ext === "sass") {
+    return svgWrap([
+      el("path", { key: 1, d: "M14.5 9c-.5 3-3.5 4.5-6.5 4.5S2 12 2 9.5c0-3 3-4 6-4.5s4-.5 4-2c0-1-1-1.5-2-1.5S7.5 2 7.5 3" }),
+    ]);
+  }
+  if (ext === "html" || ext === "htm" || ext === "vue") {
+    return svgWrap([
+      el("path", { key: 1, d: "M1.5 1.5h13L13 13l-5 2-5-2z" }),
+      el("path", { key: 2, d: "M11 4.5H5l.25 3h5.5l-.25 3-2.5 1-2.5-1-.08-1" }),
+    ]);
+  }
+  if (ext === "rs") {
+    return svgWrap([
+      el("path", { key: 1, d: "M15.5 9.5Q8 13.505.5 9.5l1-1-1-2 2-.5V4.5h2l.5-2 1.5 1 1.5-2 1.5 2 1.5-1 .5 2h2V6l2 .5-1 2z" }),
+      el("path", { key: 2, d: "M6.5 7.5a1 1 0 01-1 1 1 1 0 01-1-1 1 1 0 011-1 1 1 0 011 1m5 0a1 1 0 01-1 1 1 1 0 01-1-1 1 1 0 011-1 1 1 0 011 1M4 11.02c-.67.37-1.5.98-1.5 2.23s1.22 1.22 2 1.25v-2M12 11c.67.37 1.5 1 1.5 2.25s-1.22 1.22-2 1.25v-2" }),
+    ]);
+  }
+  if (ext === "go") {
+    return svgWrap([
+      el("path", { key: 1, d: "m15.48 8.06-4.85.48m4.85-.48a4.98 4.98 0 01-4.54 5.42 5 5 0 112.95-8.66l-1.7 1.84a2.5 2.5 0 00-4.18 2.06c.05.57.3 1.1.69 1.51.25.27 1 .83 1.78.82.8-.02 1.58-.25 2.07-.81 0 0 .8-.96.68-1.88M2.5 8.5l-2 .01m1.5 2h1.5m-2-3.99 2-.02" }),
+    ]);
+  }
+  if (ext === "sh" || ext === "bash" || ext === "zsh" || ext === "fish") {
+    return svgWrap([
+      el("path", { key: 1, d: "M2 15.5c-.7 0-1.5-.8-1.5-1.5V5c0-.7.8-1.5 1.5-1.5h9c.7 0 1.5.8 1.5 1.5v9c0 .7-.8 1.5-1.5 1.5z" }),
+      el("path", { key: 2, d: "m1.2 3.8 3.04-2.5S5.17.5 5.7.5h8.4c.66 0 1.4.73 1.4 1.4v7.73a2.7 2.7 0 01-.7 1.75l-2.68 3.51" }),
+      el("path", { key: 3, d: "M6 8.75c0-.69-.54-1.25-1.2-1.25h-.6c-.66 0-1.2.56-1.2 1.25S3.54 10 4.2 10h.6c.66 0 1.2.56 1.2 1.25s-.54 1.25-1.2 1.25h-.6c-.66 0-1.2-.56-1.2-1.25M4.5 6.5v1m0 5v1" }),
+    ]);
+  }
+  if (ext === "sql" || ext === "db" || ext === "sqlite") {
+    return svgWrap([
+      el("path", { key: 1, d: "M8 6.5c3.59 0 6.5-1.4 6.5-2.68S11.59 1.5 8 1.5 1.5 2.54 1.5 3.82 4.41 6.5 8 6.5M14.5 8c0 .83-1.24 1.79-3.25 2.2s-4.49.41-6.5 0S1.5 8.83 1.5 8m13 4.18c0 .83-1.24 1.6-3.25 2-2.01.42-4.49.42-6.5 0-2.01-.4-3.25-1.17-3.25-2m0-8.3v8.3m13-8.3v8.3" }),
+    ]);
+  }
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"].indexOf(ext) >= 0) {
+    return svgWrap([
+      el("rect", { key: 1, x: 2, y: 2, width: 12, height: 12, rx: 2 }),
+      el("circle", { key: 2, cx: 5.5, cy: 5.5, r: 1.5 }),
+      el("path", { key: 3, d: "M14 10l-3.5-3.5L3 14" }),
+    ]);
+  }
+  if (ext === "pdf") {
+    return svgWrap([
+      el("path", { key: 1, d: "M3.5 1.5h6l4 4v9a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1z" }),
+      el("path", { key: 2, d: "M9.5 1.5v4h4M5 11h2a1 1 0 0 0 0-2H5v4" }),
+    ]);
+  }
+  /* Default / LICENSE / plain text: Catppuccin folded corner _file */
+  return svgWrap([
+    el("path", { key: 1, d: "M13.5 6.5v6a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h4.01m-.01 0 5 5h-4a1 1 0 0 1-1-1z" }),
+  ]);
 }
 function SessionRow(t) {
   const e = React.createElement,
@@ -1589,6 +2286,9 @@ function SessionRow(t) {
     p = React.useState(!1),
     C = p[0],
     I = p[1],
+    cpSt = React.useState(!1),
+    cp = cpSt[0],
+    setCp = cpSt[1],
     R = s.displayTitle || s.title || o,
     T = t.branch,
     H = (w) => {
@@ -1616,6 +2316,25 @@ function SessionRow(t) {
     },
     D = () => {
       u || y || (a && a.open(o));
+    },
+    /* 复制会话所在文件夹的绝对路径（host 按 dsh 会话持久化布局计算
+     * <DSH_HOME>/sessions/<projectKey>/<session-id>/）；升 transient “已复制”态。 */
+    z = (w) => {
+      w.stopPropagation();
+      if (cp) return;
+      host
+        .call("workbench.sessionPath", { id: o, cwd: s.cwd })
+        .then((res) => {
+          const text = res && res.ok && res.path ? res.path : null;
+          if (!text) return;
+          const done = () => {
+            setCp(!0), setTimeout(() => setCp(!1), 1200);
+          };
+          navigator.clipboard
+            ? navigator.clipboard.writeText(text).then(done, done)
+            : done();
+        })
+        .catch(() => {});
     };
   return y
     ? e(
@@ -1683,6 +2402,9 @@ function SessionRow(t) {
               s.pendingInteraction
                 ? e("span", { className: "pw-dot-warn" }, "●")
                 : null,
+              s.completed && !s.pendingInteraction
+                ? e("span", { className: "pw-dot-done" }, "●")
+                : null,
               T
                 ? e(
                     "span",
@@ -1705,16 +2427,25 @@ function SessionRow(t) {
             e(
               "button",
               {
-                className: "pw-act-btn danger",
-                title: "删除（Shift 跳过确认）",
-                onClick: A,
+                className: "pw-act-btn",
+                title: cp ? "已复制" : "复制会话绝对路径",
+                onClick: z,
               },
-              TrashIcon(13),
+              cp ? CheckIcon(13) : CopyIcon(13),
             ),
             e(
               "button",
               { className: "pw-act-btn", title: "归档会话", onClick: E },
               ArchiveIcon(13),
+            ),
+            e(
+              "button",
+              {
+                className: "pw-act-btn danger",
+                title: "删除（Shift 跳过确认）",
+                onClick: A,
+              },
+              TrashIcon(13),
             ),
           ),
         );
@@ -1724,6 +2455,7 @@ function Sidebar(t) {
     s = t.layout,
     o = t.sessionsSvc,
     a = t.workspacesSvc,
+    nav = t.workspaceNav,
     l = useView(),
     c = useNotes(),
     u = useFilesTab(),
@@ -1733,7 +2465,12 @@ function Sidebar(t) {
     h = t.useWorkspaces((n) => n.items),
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
     y = t.useWorkspaces((n) => n.archivedSessionIds),
-    x = React.useState(null),
+    x = React.useState(() => {
+      const cur = k && m && m[k] && m[k].cwd;
+      if (cur) return cur;
+      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
+      return (n && n.path) || null;
+    }),
     p = x[0],
     C = x[1],
     I = React.useState({}),
@@ -1778,12 +2515,10 @@ function Sidebar(t) {
   React.useEffect(() => {
     u === "notes" && ke(!0);
   }, [u]);
-  const be = React.useState(!1),
-    Pe = be[0],
-    we = be[1],
-    ge = React.useState(!1),
-    Ne = ge[0],
-    ve = ge[1],
+  /* 焦点自动刷 git 元数据（分支徽标/worktree 列表，平时走 host gitCache，外部 checkout /
+   * worktree add 后会过期）：切回页面静默强刷，节流 10s；fn 每 render 重指避免旧闭包。
+   * 原顶部手动刷新按钮随此删除（会话列表本就走 useSessions 响应式订阅，无需手刷）。 */
+  const gitAuto = React.useRef({ at: 0, busy: !1, fn: null }),
     ye = {};
   for (const n of y || []) ye[n] = !0;
   const Y = (r || []).filter((n) => {
@@ -1791,20 +2526,29 @@ function Sidebar(t) {
       return f && !ye[n] && f.origin !== "subagent";
     }),
     Z = k ? m[k] : void 0,
-    Se = React.useRef(null);
-  (React.useEffect(() => {
-    Z && Z.cwd && C(Z.cwd);
+    Se = React.useRef(null),
+    lastSynced = React.useRef({ sid: null, cwd: null });
+  React.useEffect(() => {
+    /* 会话工作目录同步保护：
+     * 1. 当处于有效会话且该会话有 cwd 时：若会话变更 (k 变化) 或该会话 cwd 异步到齐，严格同步为当前会话所在目录；
+     *    利用 lastSynced 记录已同步状态，避免用户手动在下拉菜单切目录时被微任务中的旧 cwd 抢占回弹；
+     * 2. 只有在平台确实没有任何活跃会话且 p 尚未初始化时，才安全回退到最近或首个工作区，绝不产生竞态覆盖。 */
+    const curCwd = Z && Z.cwd;
+    if (curCwd) {
+      if (lastSynced.current.sid !== k || lastSynced.current.cwd !== curCwd) {
+        lastSynced.current = { sid: k, cwd: curCwd };
+        C(curCwd);
+      }
+    } else if (!p) {
+      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
+      if (n && n.path) C(n.path);
+    }
     const n = Se.current;
     if (((Se.current = k || null), n && n !== k && a)) {
       const f = m[n];
       f && f.blank === !0 && a.archiveSession(n).catch(() => {});
     }
-  }, [k, Z && Z.cwd]),
-    React.useEffect(() => {
-      if (p) return;
-      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
-      n && n.path && C(n.path);
-    }, [h, g]));
+  }, [k, Z && Z.cwd, h, g]);
   const oe = (n) => {
       const f = [],
         d = {},
@@ -1838,7 +2582,12 @@ function Sidebar(t) {
   }, [p]),
     React.useEffect(() => {
       sessionProbe.set(k || null);
-    }, [k]));
+      /* chat 文件点击接管的 cwd 跟踪（15-deliv）：sid/cwd 同源同拍，消费方比对 sid；
+       * m 入 deps——byId 行补齐（cwd 字段晚到）也重同步 */
+      const row = k ? m[k] : null;
+      sessionCwd.sid = k || null;
+      sessionCwd.cwd = (row && row.cwd) || null;
+    }, [k, m]));
   const ce = (n, f) =>
     n
       ? host
@@ -1851,29 +2600,42 @@ function Sidebar(t) {
   React.useEffect(() => {
     ce(p, !1);
   }, [p]);
-  const Te = () => {
-      if (Pe) return;
-      (ve(!1), we(!0));
-      const n = () => {
-        (we(!1), flashDone(ve));
+  ((gitAuto.current.fn = () => {
+      const n = gitAuto.current;
+      if (n.busy || document.visibilityState !== "visible") return;
+      const f = Date.now();
+      if (f - n.at < 1e4) return;
+      ((n.at = f), (n.busy = !0));
+      const d = () => {
+        n.busy = !1;
       };
-      Promise.all([oe(!0), ce(p, !0)]).then(n, n);
-    },
-    $ = {};
+      Promise.all([oe(!0), ce(p, !0)]).then(d, d);
+    }),
+    React.useEffect(() => {
+      const n = () => gitAuto.current.fn && gitAuto.current.fn();
+      (window.addEventListener("focus", n),
+        document.addEventListener("visibilitychange", n));
+      return () => {
+        (window.removeEventListener("focus", n),
+          document.removeEventListener("visibilitychange", n));
+      };
+    }, []));
+  const $ = {};
   for (const n of Y) {
     const f = m[n],
       d = ee(f.cwd);
     if (!d) continue;
-    $[d] || ($[d] = { root: d, latest: 0, running: 0, pending: 0 });
+    $[d] || ($[d] = { root: d, latest: 0, running: 0, pending: 0, done: 0 });
     const W = $[d];
     ((f.updatedAt || 0) > W.latest && (W.latest = f.updatedAt || 0),
       f.running && W.running++,
-      f.pendingInteraction && W.pending++);
+      f.pendingInteraction && W.pending++,
+      f.completed && W.done++);
   }
   (rememberRoot(M),
-    M && !$[M] && ($[M] = { root: M, latest: 0, running: 0, pending: 0 }));
+    M && !$[M] && ($[M] = { root: M, latest: 0, running: 0, pending: 0, done: 0 }));
   for (const n of recentRoots)
-    $[n] || ($[n] = { root: n, latest: 0, running: 0, pending: 0 });
+    $[n] || ($[n] = { root: n, latest: 0, running: 0, pending: 0, done: 0 });
   const Le = Object.keys($)
       .map((n) => $[n])
       .sort((n, f) => f.latest - n.latest),
@@ -1896,6 +2658,9 @@ function Sidebar(t) {
     aPend = te.reduce((n, f) => n + f.pending, 0),
     cRun = aRun - oRun,
     cPend = aPend - oPend,
+    oDone = oWs.reduce((n, f) => n + f.done, 0),
+    aDone = te.reduce((n, f) => n + f.done, 0),
+    cDone = aDone - oDone,
     Re = Y.filter((n) => !m[n].blank && (!M || ee(m[n].cwd) === M)).sort(
       (n, f) => (m[f].updatedAt || 0) - (m[n].updatedAt || 0),
     ),
@@ -1905,46 +2670,68 @@ function Sidebar(t) {
         (b.worktrees.find((n) => n.path === b.currentWorktreePath) ||
           b.worktrees.find((n) => n.isMain))) ||
       null,
+    we = (n) => {
+      if (!n) return null;
+      const f = ee(n) || n,
+        d = canonPath(f);
+      /* 1.20.2：两遍匹配——ee() 会把 worktree 路径解析回主仓库根，单轮循环里
+       * 主根查询可能先命中排在前面的 worktree 工作区，会话被开进 worktree 目录。
+       * 精确/规范化路径必须优先，根级模糊匹配只作兜底。 */
+      for (const W of h || [])
+        if (W && W.path && (W.path === n || W.path === f || canonPath(W.path) === d))
+          return W;
+      for (const W of h || [])
+        if (W && W.path && canonPath(ee(W.path)) === d) return W;
+      return null;
+    },
     _e = (n) => {
-      if (!a || !n) return;
-      const f = (h || []).find((d) => d.path === n);
+      if (!n || !nav) return;
+      const f = we(n);
       if (f) {
-        a.startSession(f.workspaceId);
+        nav.startSession(f.workspaceId);
         return;
       }
-      a.create({ path: n })
-        .then((d) => a.startSession(d.workspaceId))
+      if (!a) return;
+      const d = ee(n) || n;
+      a.create({ path: d })
+        .then((W) => nav.startSession(W.workspaceId))
         .catch(() => {});
     },
     Ve = () => {
-      a &&
-        a
-          .pickDirectory()
+      /* 1.19.11 起换应用内 DirPicker（见 15-dirpicker.js），不再依赖 native capability
+       * 的 svc.pickDirectory()；先收项目下拉再开模态。落点走默认目录（1.19.12：桌面，
+       * 星钮可自定），不再以当前项目为初始路径。
+       * 评审修复（保留语义）：新目录经 _e 连接并打开其会话——直接 connect 会丢弃返回 id，
+       * 用户切到无会话的新目录后对话区仍停留在旧目录的会话 */
+      (D(!1),
+        pickDir({ title: "选择项目目录" })
           .then((n) => {
             if (!n) return;
-            (C(n), D(!1));
-            const f = (h || []).find((d) => d.path === n);
-            if (f) {
-              a.connectWorkspace(f.workspaceId);
-              return;
-            }
-            return a
-              .create({ path: n })
-              .then((d) => a.connectWorkspace(d.workspaceId));
+            (C(n), _e(n));
           })
-          .catch(() => {});
+          .catch(() => {}));
     },
     xe = (n) => {
-      const f = Y.filter(n).sort(
+      /* 1.20.2：跳过 blank 会话——「＋ 新建」留下的空会话 updatedAt 必然最新，
+       * 不跳过则每次切项目都落进空会话，表现为「路径切了、会话没切过去」；
+       * 真想要空会话时 _e 兜底的 connectWorkspace 会复用项目里的 blank，不会重复建。 */
+      const f = Y.filter((d) => !m[d].blank && n(d)).sort(
         (d, W) => (m[W].updatedAt || 0) - (m[d].updatedAt || 0),
       )[0];
-      f && o && o.open(f);
+      /* 评审修复：返回是否命中，无匹配会话时调用方落到 _e 连接目标工作区 */
+      if (!f || !o) return false;
+      o.open(f);
+      return true;
     },
     $e = (n) => {
-      (C(n), D(!1), z(""), xe((f) => ee(m[f].cwd) === n));
+      (C(n), D(!1), z(""));
+      /* 评审修复：切到无会话的项目兜底连接其工作区（对齐“新建”），否则对话区停留旧会话 */
+      xe((f) => ee(m[f].cwd) === n) || _e(n);
     },
     Ge = (n) => {
-      (C(n), _(!1), V(""), N(""), F(!1), xe((f) => m[f].cwd === n));
+      (C(n), _(!1), V(""), N(""), F(!1));
+      /* 评审修复：见 $e——worktree 无会话同样兜底连接 */
+      xe((f) => m[f].cwd === n) || _e(n);
     },
     Ce = () => {
       !se.trim() ||
@@ -2016,24 +2803,30 @@ function Sidebar(t) {
       e(
         "div",
         { className: "pw-drop-list" },
-        je.map((n) =>
-          dropRowEl({
+        je.map((n) => {
+          const isCur = canonPath(n.root) === canonPath(M);
+          return dropRowEl({
             k: n.root,
-            cur: canonPath(n.root) === canonPath(M),
+            cur: isCur,
             title: n.root,
             onClick: () => $e(n.root),
             label: shortenPath(n.root),
-            /* 活动徽标经 extra 注入（数组子节点补 key，原为静态子参数无需 key） */
-            extra: [
-              n.running > 0
-                ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
-                : null,
-              n.pending > 0
-                ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
-                : null,
-            ],
-          }),
-        ),
+            /* 活动徽标经 extra 注入；当前项目不重复显示（其会话已平铺在下方列表） */
+            extra: isCur
+              ? null
+              : [
+                  n.running > 0
+                    ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
+                    : null,
+                  n.pending > 0
+                    ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
+                    : null,
+                  n.done > 0
+                    ? e("span", { key: "d", className: "pw-act done" }, "● " + n.done)
+                    : null,
+                ],
+          });
+        }),
         je.length === 0
           ? e("div", { className: "pw-hint" }, "没有匹配的项目")
           : null,
@@ -2221,7 +3014,6 @@ function Sidebar(t) {
         onTab: (n) => filesTabStore.set(n),
         onPickNotes: pickNotesDir,
         layout: s,
-        workspaces: a,
         open: pe,
         onToggle: ke,
         sessionId: k,
@@ -2230,7 +3022,7 @@ function Sidebar(t) {
             ? (n) =>
                 t.mentionBridge.mention(
                   k,
-                  mentionPath(n.path, n.type === "directory"),
+                  mentionRef(n.path, n.type === "directory"),
                 )
             : void 0,
         onMentionAbs:
@@ -2238,7 +3030,7 @@ function Sidebar(t) {
             ? (n) =>
                 t.mentionBridge.mention(
                   k,
-                  "@" + n.path + (n.type === "directory" ? "/ " : " "),
+                  mentionRef(n.path, n.type === "directory", { abs: true }),
                 )
             : void 0,
       }),
@@ -2259,17 +3051,6 @@ function Sidebar(t) {
             onClick: () => _e(p),
           },
           "＋ 新建",
-        ),
-        e(
-          "button",
-          {
-            className:
-              "pw-icon-btn" + (Pe ? " spin" : "") + (Ne ? " flash" : ""),
-            title: "刷新",
-            onClick: Te,
-          },
-          RefreshIcon(14),
-          Ne ? flashEl(14) : null,
         ),
         e(
           "button",
@@ -2299,27 +3080,34 @@ function Sidebar(t) {
             /* LRM 前缀：RTL 截断下保住 ~/ 等前导中性字符的显示顺序 */
             M ? "\u200e" + shortenPath(M) : "选择项目…",
           ),
-          aRun + aPend > 0
+          oRun + oPend + oDone > 0
             ? e(
                 "span",
                 {
                   className: "pw-act-badge",
                   title:
-                    "进行中 " +
-                    aRun +
+                    "其他项目：进行中 " +
+                    oRun +
                     " · 待交互 " +
-                    aPend +
-                    "（其中当前工作区：进行中 " +
+                    oPend +
+                    " · 已完成未看 " +
+                    oDone +
+                    "（当前项目：进行中 " +
                     cRun +
                     " · 待交互 " +
                     cPend +
+                    " · 已完成未看 " +
+                    cDone +
                     "）",
                 },
-                aRun > 0
-                  ? e("span", { className: "pw-act run" }, "● " + aRun)
+                oRun > 0
+                  ? e("span", { className: "pw-act run" }, "● " + oRun)
                   : null,
-                aPend > 0
-                  ? e("span", { className: "pw-act warn" }, "● " + aPend)
+                oPend > 0
+                  ? e("span", { className: "pw-act warn" }, "● " + oPend)
+                  : null,
+                oDone > 0
+                  ? e("span", { className: "pw-act done" }, "● " + oDone)
                   : null,
               )
             : null,
@@ -2368,7 +3156,7 @@ function Sidebar(t) {
   );
 }
 /* ==================== details 面板驱动管理器 ====================
- * details 槽的仲裁层：文件预览是默认驱动，其余面板（助手、第三方）经
+ * details 槽的仲裁层：文件预览是默认驱动，其余面板（第三方）经
  * dshDetailsPanels 服务注册为驱动，open/close 排他（替换式弹出：激活即
  * 整体替换右栏内容，关闭即回预览）。驱动不再裸抢 details 槽的 priority；
  * 外来裸注册插件仍按槽语义（最小者渲染）轮值。 */
@@ -2462,6 +3250,56 @@ function detailsAlive(sid, path) {
   return sessionProbe.sid === sid && store.bucket(sid).active === path;
 }
 
+function parseGitDiff(diffText) {
+  if (!diffText) return [];
+  const rawLines = diffText.split("\n");
+  const parsed = [];
+  let oldLine = 0;
+  let newLine = 0;
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    const raw = rawLines[idx];
+    if (
+      raw.startsWith("diff --git") ||
+      raw.startsWith("index ") ||
+      raw.startsWith("--- ") ||
+      raw.startsWith("+++ ") ||
+      raw.startsWith("\\")
+    ) {
+      continue;
+    }
+    const hunkMatch = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      oldLine = parseInt(hunkMatch[1], 10);
+      newLine = parseInt(hunkMatch[2], 10);
+      continue;
+    }
+    if (raw.startsWith("+")) {
+      parsed.push({
+        type: "add",
+        lineNo: newLine++,
+        prefix: "+",
+        text: raw.slice(1),
+      });
+    } else if (raw.startsWith("-")) {
+      parsed.push({
+        type: "del",
+        lineNo: oldLine++,
+        prefix: "-",
+        text: raw.slice(1),
+      });
+    } else {
+      parsed.push({
+        type: "ctx",
+        lineNo: newLine++,
+        prefix: " ",
+        text: raw.startsWith(" ") ? raw.slice(1) : raw,
+      });
+      oldLine++;
+    }
+  }
+  return parsed;
+}
+
 function Details(t) {
   const e = React.createElement,
     s = t.layout,
@@ -2469,8 +3307,10 @@ function Details(t) {
   React.useEffect(() => sessionProbe.sub(() => a((i) => i + 1)), []);
   const sidRef = React.useRef(sessionProbe.sid);
   React.useEffect(() => {
-    sidRef.current !== sessionProbe.sid &&
-      ((sidRef.current = sessionProbe.sid), a((i) => i + 1));
+    if (sidRef.current !== sessionProbe.sid) {
+      /* 切会话平台会关 details 列（AppFrame 私有面），缩放态跟着退，别让 fixed 面板悬空 */
+      ((sidRef.current = sessionProbe.sid), setZoomed(!1), a((i) => i + 1));
+    }
   });
   const l = usePreviewState(sessionProbe.sid),
     c = l.activeFile,
@@ -2508,6 +3348,78 @@ function Details(t) {
   React.useEffect(() => {
     edRef.current = ed;
   });
+  const zm = React.useState(!1),
+    zoomed = zm[0],
+    setZoomed = zm[1],
+    rootRef = React.useRef(null),
+    diffSt = React.useState(""),
+    diffText = diffSt[0],
+    setDiffText = diffSt[1],
+    diffLdSt = React.useState(!1),
+    diffLoading = diffLdSt[0],
+    setDiffLoading = diffLdSt[1],
+    diffParsed = React.useMemo(() => parseGitDiff(diffText), [diffText]),
+    loadDiff = (targetPath) => {
+      if (!targetPath) return;
+      setDiffLoading(!0);
+      host
+        .call("workbench.gitDiff", { path: targetPath })
+        .then((res) => {
+          setDiffLoading(!1);
+          setDiffText((res && res.diff) || "");
+        })
+        .catch(() => {
+          setDiffLoading(!1);
+          setDiffText("");
+        });
+    };
+  /* 预览缩放（⤢）：不碰平台右栏宽度（300–520 是 ui-layout columns.ts 的契约钳制），
+   * 纯 CSS 把自家 .pw-details 切成 fixed 居中大面板——DOM 不动、组件不卸载，
+   * 滚动位置 / 编辑 buffer / 已加载内容零损失；Esc / 点遮罩 / 再点按钮收回。
+   * Platform-private surface：fixed 定位依赖 details 槽祖先链无 transform/filter
+   * 捕获（ui-layout AppFrame.module.css 当前满足；被捕获时 fixed 退化为相对该祖先，
+   * 视觉上卡死在栏内）——toggleZoom 一次性自检，平台升级先核它。 */
+  const fixedCaptured = (el) => {
+    for (let n = el && el.parentElement; n; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (
+        cs.transform !== "none" ||
+        cs.filter !== "none" ||
+        cs.backdropFilter !== "none" ||
+        cs.perspective !== "none" ||
+        /* paint/strict/content 含 paint  containment → 也捕获 fixed */
+        /paint|strict|content/.test(cs.contain) ||
+        cs.contentVisibility !== "visible" ||
+        (cs.willChange !== "auto" && cs.willChange !== "none")
+      )
+        return true;
+    }
+    return false;
+  };
+  const toggleZoom = () => {
+    if (zoomed) return setZoomed(!1);
+    if (fixedCaptured(rootRef.current))
+      return console.warn("[dsh-geek-sidebar] 预览缩放取消：details 祖先链出现 transform/filter/contain 捕获，fixed 会退化（平台布局变了，先核 AppFrame.module.css）");
+    setZoomed(!0);
+  };
+  React.useEffect(() => {
+    if (!zoomed) return undefined;
+    const onKey = (ev) => {
+      /* 图片放大开着时 Esc 归 ImgZoomView，一层一层退；编辑中 Esc 不收面板（edRef 实时读，免 deps 抖动） */
+      if (ev.key === "Escape" && !imgZoomStore.src && !edRef.current) setZoomed(!1);
+    };
+    document.addEventListener("keydown", onKey);
+    /* 窄屏（≤1219px，对齐 13-drawer 断点）让步链派生关栏 + drawer 出场——退缩放让位，防 fixed 面板悬空撞层 */
+    const mq = window.matchMedia("(max-width:1219px)");
+    const onNarrow = () => {
+      mq.matches && setZoomed(!1);
+    };
+    mq.addEventListener("change", onNarrow);
+    onNarrow();
+    return () => {
+      (document.removeEventListener("keydown", onKey), mq.removeEventListener("change", onNarrow));
+    };
+  }, [zoomed]);
   React.useEffect(() => {
     if ((m(null), p(""), R(!1), b(!1), E(!1), setEd(!1), (D.current = []), !c))
       return;
@@ -2527,9 +3439,23 @@ function Details(t) {
     );
   }, [c && c.path]);
   React.useEffect(() => {
+    if (c && c.modeHint === "diff") {
+      g("diff");
+    } else if (c && !c.modeHint && h === "diff") {
+      g("auto");
+    }
+  }, [c && c.path, c && c.modeHint]);
+  React.useEffect(() => {
+    if (h === "diff" && c) loadDiff(c.path);
+  }, [c && c.path, h]);
+  React.useEffect(() => {
     if (!c) return;
     const rf = () => {
       if (edRef.current || document.visibilityState !== "visible") return;
+      if (h === "diff") {
+        c && loadDiff(c.path);
+        return;
+      }
       const sid0 = sessionProbe.sid, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
@@ -2595,90 +3521,157 @@ function Details(t) {
         N.scrollIntoView({ behavior: "smooth", block: "start" }),
         E(!1));
     },
-    q = () => (
-      (D.current = []),
-      c
-        ? r
-          ? r.error
-            ? e(
-                "div",
-                { className: "pw-hint", style: { padding: "20px" } },
-                "无法预览：" + r.error,
-              )
-            : r.kind === "image"
-              ? e(
-                  "div",
-                  { className: "pw-img-wrap" },
-                  e("img", {
-                    src: r.url,
-                    alt: c.name,
-                    onClick: (g) => {
-                      (g.stopPropagation(), imgZoomStore.set(r.url));
-                    },
-                  }),
-                )
-              : r.kind === "pdf"
-                ? e("iframe", {
-                    className: "pw-frame",
-                    src: r.url,
-                    title: c.name,
-                  })
-                : r.kind === "html"
-                  ? e("iframe", {
-                      className: "pw-frame",
-                      srcDoc: r.html || "",
-                      sandbox: "",
-                      title: c.name,
-                    })
-                  : r.kind === "text" && isHtmlExt(c.name)
-                    ? e("iframe", {
-                        className: "pw-frame",
-                        srcDoc: r.text || "",
-                        sandbox: "",
-                        title: c.name,
-                      })
-                    : j === "preview"
-                      ? e(
-                          "div",
-                          { className: "pw-md" },
-                          renderMarkdown(
-                            r.text || "",
-                            D.current,
-                            c && c.path ? c.path.replace(/\/[^/]*$/, "") : "",
-                          ),
-                        )
-                      : isCsvExt(c.name)
-                        ? e(CsvView, { text: r.text || "" })
-                        : isCodeExt(c.name)
-                          ? e(
-                              "div",
-                              { className: "pw-codeview" },
-                              highlightCode(
-                                r.text || "",
-                                c.name.split(".").pop().toLowerCase(),
-                              ),
-                            )
-                          : e("pre", { className: "pw-src" }, r.text || "")
-          : e(
-              "div",
-              { className: "pw-hint", style: { padding: "20px" } },
-              "加载中…",
-            )
-        : e(
+    q = () => {
+      (D.current = []);
+      if (!c) {
+        return e(
+          "div",
+          { className: "pw-empty" },
+          e("div", { className: "pw-empty-logo" }, FileTextIcon(40)),
+          e("div", null, "在左侧「项目」或「知识库」中点击文件进行预览"),
+          e(
+            "div",
+            { className: "pw-hint" },
+            "支持多标签 · Markdown / 图片 / 文本",
+          ),
+        );
+      }
+      if (j === "diff") {
+        if (diffLoading) {
+          return e(
+            "div",
+            { className: "pw-hint", style: { padding: "20px" } },
+            "加载 Diff 中…",
+          );
+        }
+        if (!diffText || !diffText.trim()) {
+          return e(
             "div",
             { className: "pw-empty" },
-            e("div", { className: "pw-empty-logo" }, FileTextIcon(40)),
-            e("div", null, "在左侧「项目」或「笔记」中点击文件进行预览"),
+            e("div", { style: { fontWeight: 600, fontSize: "14px" } }, "无未提交变更"),
             e(
               "div",
-              { className: "pw-hint" },
-              "支持多标签 · Markdown / 图片 / 文本",
+              { style: { fontSize: "12px", color: "var(--dsw-alias-label-secondary)" } },
+              "当前文件与 Git HEAD 保持一致",
             ),
-          )
-    );
+          );
+        }
+        if (diffText.includes("Binary files") || diffText.includes("GIT binary patch")) {
+          return e(
+            "div",
+            { className: "pw-empty" },
+            e("div", { style: { fontWeight: 600, fontSize: "14px" } }, "二进制文件变更"),
+            e(
+              "div",
+              { style: { fontSize: "12px", color: "var(--dsw-alias-label-secondary)" } },
+              "二进制文件不提供内联差异文本比对",
+            ),
+          );
+        }
+        return e(
+          "div",
+          { className: "pw-diff-view" },
+          e(
+            "pre",
+            { className: "pw-diff-pre" },
+            diffParsed.map((l, idx) => {
+              const cls =
+                l.type === "add"
+                  ? "pw-diff-add"
+                  : l.type === "del"
+                    ? "pw-diff-del"
+                    : "pw-diff-ctx";
+              return e(
+                "div",
+                { key: idx, className: "pw-diff-line " + cls },
+                e("span", { className: "pw-diff-num" }, l.lineNo),
+                e("span", { className: "pw-diff-prefix" }, l.prefix),
+                e("span", { className: "pw-diff-code" }, l.text || "\u00a0"),
+              );
+            }),
+          ),
+        );
+      }
+      if (!r) {
+        return e(
+          "div",
+          { className: "pw-hint", style: { padding: "20px" } },
+          "加载中…",
+        );
+      }
+      if (r.error) {
+        return e(
+          "div",
+          { className: "pw-hint", style: { padding: "20px" } },
+          "无法预览：" + r.error,
+        );
+      }
+      if (r.kind === "image") {
+        return e(
+          "div",
+          { className: "pw-img-wrap" },
+          e("img", {
+            src: r.url,
+            alt: c.name,
+            onClick: (g) => {
+              (g.stopPropagation(), imgZoomStore.set(r.url));
+            },
+          }),
+        );
+      }
+      if (r.kind === "pdf") {
+        return e("iframe", {
+          className: "pw-frame",
+          src: r.url,
+          title: c.name,
+        });
+      }
+      if (r.kind === "html" || (r.kind === "text" && isHtmlExt(c.name))) {
+        return e("iframe", {
+          className: "pw-frame",
+          srcDoc: r.html || r.text || "",
+          sandbox: "",
+          title: c.name,
+        });
+      }
+      if (j === "preview") {
+        return e(
+          "div",
+          { className: "pw-md" },
+          renderMarkdown(
+            r.text || "",
+            D.current,
+            c && c.path ? pathDir(c.path) : "",
+          ),
+        );
+      }
+      if (isCsvExt(c.name)) {
+        return e(CsvView, { text: r.text || "" });
+      }
+      if (isCodeExt(c.name)) {
+        return e(
+          "div",
+          { className: "pw-codeview" },
+          highlightCode(
+            r.text || "",
+            c.name.split(".").pop().toLowerCase(),
+          ),
+        );
+      }
+      return e("pre", { className: "pw-src" }, r.text || "");
+    };
   return e(
-    "div",
-    { className: "pw-details" },
+    React.Fragment,
+    null,
+    zoomed
+      ? e("div", {
+          className: "pw-zoomview-mask",
+          onClick: () => setZoomed(!1),
+        })
+      : null,
+    e(
+      "div",
+      { className: "pw-details" + (zoomed ? " zoomed" : ""), ref: rootRef },
     e(
       "div",
       { className: "pw-tabs" },
@@ -2710,12 +3703,26 @@ function Details(t) {
             ),
           ),
       e("span", { className: "pw-tabs-flex" }),
+      t.inDrawer
+        ? null
+        : e(
+            "button",
+            {
+              className: "pw-col-btn",
+              title: zoomed ? "收回预览 (Esc)" : "放大预览",
+              onClick: toggleZoom,
+            },
+            zoomed ? "⤡" : "⤢",
+          ),
       e(
         "button",
         {
           className: "pw-col-btn",
           title: "收起右栏",
-          onClick: () => s && s.closeDetails(),
+          /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
+          onClick: () => {
+            (setZoomed(!1), s && s.closeDetails());
+          },
         },
         "»",
       ),
@@ -2724,7 +3731,30 @@ function Details(t) {
       ? e(
           "div",
           { className: "pw-toolbar" },
-          e("span", { className: "pw-crumbs" }, K.join(" / ")),
+          e(
+            "span",
+            { className: "pw-crumbs" },
+            r && r.text
+              ? (() => {
+                  const ext = (c.name.split(".").pop() || "").toLowerCase();
+                  const langMap = {
+                    md: "markdown", markdown: "markdown", ts: "typescript", tsx: "tsx",
+                    js: "javascript", jsx: "jsx", py: "python", json: "json",
+                    yml: "yaml", yaml: "yaml", toml: "toml", css: "css", html: "html",
+                    sh: "bash", bash: "bash", rs: "rust", go: "go", sql: "sql",
+                  };
+                  const lang = langMap[ext] || ext || "text";
+                  const lines = r.text.split("\n").length;
+                  const bLen = new TextEncoder().encode(r.text).length;
+                  const sz = bLen < 1024 ? bLen + " B" : (bLen / 1024).toFixed(1) + " KB";
+                  return lang + " · " + lines + " 行 · " + sz + (r.truncated ? " (截断)" : "");
+                })()
+              : r && r.kind === "image"
+                ? "图片" + (r.size ? " · " + (r.size < 1024 ? r.size + " B" : (r.size / 1024).toFixed(1) + " KB") : "")
+                : r && r.kind === "pdf"
+                  ? "PDF" + (r.size ? " · " + (r.size < 1024 ? r.size + " B" : (r.size / 1024).toFixed(1) + " KB") : "")
+                  : "",
+          ),
           e(
             "span",
             { className: "pw-toolbar-right" },
@@ -2747,13 +3777,26 @@ function Details(t) {
               },
               "Source",
             ),
+            c && isMd(c.name)
+              ? e(
+                  "button",
+                  {
+                    className: "pw-tg" + (j === "preview" ? " on" : ""),
+                    onClick: () => g("preview"),
+                  },
+                  "Preview",
+                )
+              : null,
             e(
               "button",
               {
-                className: "pw-tg" + (j === "preview" ? " on" : ""),
-                onClick: () => g("preview"),
+                className: "pw-tg" + (j === "diff" ? " on" : ""),
+                onClick: () => {
+                  g("diff");
+                  c && loadDiff(c.path);
+                },
               },
-              "Preview",
+              "Diff",
             ),
             t.mentionBridge
               ? e(
@@ -2766,7 +3809,7 @@ function Details(t) {
                         sessionProbe.sid &&
                         t.mentionBridge.mention(
                           sessionProbe.sid,
-                          mentionPath(c.path),
+                          mentionRef(c.path, false),
                         );
                     },
                   },
@@ -2908,6 +3951,7 @@ function Details(t) {
           q(),
         ),
       e(ImgZoomView, null),
+    ),
   );
 }
 /* 评审修复：模块级 var mdBaseDir 已删——基目录改由 renderMarkdown 经 bd 显式传入
@@ -2918,11 +3962,13 @@ function isExternalHref(s) {
 function resolveLocalPath(s, bd) {
   s = String(s || "").trim();
   if (!s || isExternalHref(s)) return null;
-  s = s.replace(/^\.\//, "");
-  if (s.slice(0, 2) === "~/") return s;
-  if (s.charAt(0) !== "/") {
+  s = s.replace(/^\.[\\/]/, "");
+  if (s.slice(0, 2) === "~/" || s.slice(0, 2) === "~\\") return s;
+  /* 绝对路径两种形态都认：POSIX /... 与 Windows 盘符（C:\... / C:/...），
+   * 否则 markdown 里写的 Windows 绝对路径会被误当相对路径拼到基目录后 */
+  if (s.charAt(0) !== "/" && !/^[A-Za-z]:[\\/]/.test(s)) {
     if (!bd) return null;
-    s = bd + "/" + s;
+    s = pathJoinFor(bd, s);
   }
   return s;
 }
@@ -2932,7 +3978,7 @@ function mediaUrl(s, bd) {
 }
 function openLocalPath(p) {
   try {
-    store.open(sessionProbe.sid, { path: p, name: p.split("/").pop() || p });
+    store.open(sessionProbe.sid, { path: p, name: baseName(p) || p });
   } catch (e) {}
 }
 
@@ -2985,6 +4031,8 @@ function PreviewDrawer(t) {
         /* 评审修复：删掉 sessionId 死 prop——Details 只读 sessionProbe.sid，从不消费该 prop。
          *（16-apply 的 PanelHost 仍保留 sessionId：那是 dshDetailsPanels 三方驱动的服务面，非 Details 私有） */
         layout: t.layout,
+        /* drawer 本来就是宽面板，缩放钮只在右栏模式出场 */
+        inDrawer: !0,
         workspacesSvc: t.workspacesSvc,
         mentionBridge: t.mentionBridge,
       }),
@@ -2992,6 +4040,7 @@ function PreviewDrawer(t) {
   );
 }
 
+/* 底栏图标：技能（Layers）——FootBar 入口的专属图形 */
 function LayersIcon(t) {
   return ic(
     [
@@ -3002,1488 +4051,2327 @@ function LayersIcon(t) {
     t,
   );
 }
+/* ==================== chat 文件点击接管（deliv-hook） ====================
+ * 对话里两类文件点击面默认走平台 openFile → remote.session.openWorkspacePath →
+ * 宿主原生 open（系统默认应用，即"外部打开"）。这里在 document capture 阶段拦
+ * 普通左键改道应用内预览（delivOpenFile → openLocalPath）；修饰键点击保留系统
+ * 打开。（v1.22.0 起：产物/链接弹出面板与事件窗口订阅整体移除，仅保留本接管。）
+ *   ① 产出文件 chip（ui-deliverables ProducedFiles.tsx）：行容器自带
+ *      data-produced-files-row，chip 为 button[title=完整路径]；
+ *      「在文件夹中显示」钮 openFile('.') 无 title 属性，自然放行。
+ *   ② 工具卡文件链接（ui-tool ToolRow.tsx，read/write/edit 行）：摘要按钮产物类名
+ *      形如 "o3BgMG_fileLink"（vite CSS Modules <hash>_<local>，fileLink 子段健在），
+ *      行根带 data-variant/data-tool；按钮文本 = 原路径 relativizeToCwd（剥 cwd 前缀）
+ *      + abbreviateHomePath（home→~）后的摘要——相对/绝对反解进预览，~ 摘要
+ *      （客户端无宿主 home）放行外部打开。
+ * React 17+ 事件委托挂根容器——document capture 先于根委托触发，stopPropagation
+ * 即断其 onClick（平台 fileLink 自身也 stopPropagation，行展开不受影响）。
+ *
+ * 钉住的平台私有面（0.1.2-alpha.4，平台升级先核对）：
+ *   - chat openFile→openWorkspacePath 外部打开语义（ui-chat apply.ts）
+ *   - ProducedFiles 行容器属性 data-produced-files-row + chip button[title=完整路径]
+ *   - ToolRow 行根 data-variant + 摘要按钮产物类名含 fileLink 子段 + 摘要文本 =
+ *     relativizeToCwd + abbreviateHomePath 语义
+ *   - React 17+ 根容器事件委托（document capture 先于根委托）
+ * cwd 来源：当前会话 byId.cwd（sessionCwd，09-sidebar 会话订阅效应同步写）。
+ */
 
-function BotIcon(t) {
+/* 相对路径按会话 cwd 解析成绝对路径（预览打开用）；绝对路径原样 */
+function delivAbsPath(cwd, p) {
+  const s = String(p || "");
+  if (!s) return "";
+  if (s.charAt(0) === "/" || s.charAt(0) === "~" || /^[A-Za-z]:[\\/]/.test(s)) return s;
+  return cwd ? pathJoinFor(cwd, s) : s;
+}
+
+/* chat 点文件：先让当前右栏占用者退场（对齐 03-tree 的 yieldToPreview 纪律）再进预览 */
+function delivOpenFile(cwd, p) {
+  yieldToPreview();
+  openLocalPath(delivAbsPath(cwd, p));
+}
+
+const DELIV_CHIP_SEL = "div[data-produced-files-row] button[title]";
+const DELIV_TOOL_LINK_SEL = 'div[data-variant] [class*="fileLink"]';
+function delivChipHook(ev) {
+  if (ev.defaultPrevented || ev.button !== 0) return;
+  if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+  const tgt = ev.target;
+  if (!tgt || !tgt.closest) return;
+  const sid = sessionProbe.sid;
+  if (!sid) return;
+  const cwd = sessionCwd.sid === sid ? sessionCwd.cwd : null;
+  /* ① 产出文件 chip：title 即完整路径（~ 开头无法反解，放行外部，与 ② 同规） */
+  const chip = tgt.closest(DELIV_CHIP_SEL);
+  if (chip) {
+    const p = chip.getAttribute("title");
+    if (!p || p === "." || p.charAt(0) === "~") return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    delivOpenFile(cwd, p);
+    return;
+  }
+  /* ② 工具卡文件链接：摘要文本反解（相对路径按 cwd；~ 摘要无法反解，放行外部） */
+  const link = tgt.closest(DELIV_TOOL_LINK_SEL);
+  if (!link) return;
+  const raw = (link.textContent || "").trim();
+  if (!raw || raw.charAt(0) === "~") return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  delivOpenFile(cwd, raw);
+}
+function installDelivChipHook() {
+  /* HMR 幂等：模块重载重跑 apply 时先摘旧闭包（旧实例 store/probe 已冻结） */
+  const flag = "__dshDelivChipHook";
+  if (document[flag]) document.removeEventListener("click", document[flag], true);
+  document[flag] = delivChipHook;
+  document.addEventListener("click", delivChipHook, true);
+}
+
+/* DirPicker：应用内目录选择模态（交互复刻 pi-web 的 DirectoryPicker），统一三处路径选择
+ * ——09 项目"自定义路径" / 15 终端 ＋ / 01 笔记"选择目录…"，替换原生 OS 对话框
+ *（svc.pickDirectory、/wb/notesPick 的 osascript；原生路由仍在 host 保留给外部调用）。
+ *
+ * 架构（对齐既有模式）：
+ *  - dirPicker 是纯状态机 store（不挂 React 钩子，可无头驱动；代际 seq 防迟到回包写态）；
+ *  - pickDir(opts) → Promise<path|null>，签名对齐平台 workspaces.pickDirectory，
+ *    调用点把 svc.pickDirectory() 换成 pickDir() 即完成迁移；
+ *  - DirPickerHost 单实例挂 shell.overlay（16-apply），req 空即卸载；
+ *  - 导航走自家 workbench.listDir（响应带 path/parent）；起点语义收口在 nav：
+ *    null = 默认目录（workbench.prefsGet，未自定义回落桌面；footer 星钮经 prefsSet 自定），
+ *    无 native capability 依赖——纯浏览器远程访问场景同样可用（原生对话框的盲区）；
+ *  - 专属 bus 频道 'dirPicker'（对齐 01-stores 的热路径扇出纪律）：击键/导航重渲染
+ *    只触达本模态，不扰动侧栏树等全局订阅者。
+ * 只列目录（listDir 同时返回文件，此处过滤）；隐藏目录保留（~/.dsh 这类目标可达）。 */
+const DIRPICKER_CHAN = "dirPicker",
+  dirPicker = {
+  req: null /* { title, resolve }——非空即"打开中" */,
+  path: "",
+  parent: null,
+  input: "",
+  entries: [],
+  loading: false,
+  error: null,
+  seq: 0 /* 导航代际：每次 nav/settle 递增，迟到的响应不得写态 */,
+  /* 默认打开目录（1.19.12）：defDir null = 未加载；未自定义/已失效时 host 回落桌面。
+   * 首开由 nav(null) 先拉偏好再导航，之后常驻内存（footer 星钮可改） */
+  defDir: null,
+  defCustom: false,
+  open(t) {
+    dirPicker.req && dirPicker.settle(false) /* 重开先结算旧请求，不留悬空 Promise */;
+    const e = ++dirPicker.seq;
+    return new Promise((s) => {
+      ((dirPicker.req = { title: (t && t.title) || "选择目录", resolve: s }),
+        (dirPicker.path = ""),
+        (dirPicker.parent = null),
+        (dirPicker.input = (t && t.initialPath) || ""),
+        (dirPicker.entries = []));
+      /* 起点解析单点收口在 nav：null = 默认目录 */
+      dirPicker.nav(t && t.initialPath ? String(t.initialPath) : null, e);
+    });
+  },
+  /* footer 星钮：把当前目录设为默认；当前即自定义默认时再点为清除（恢复桌面回落） */
+  toggleDefault() {
+    const t = dirPicker.path;
+    if (!t) return;
+    const e = t === dirPicker.defDir && dirPicker.defCustom;
+    host.call("workbench.prefsSet", { pickerDir: e ? "" : t }).then(
+      (s) => {
+        if (!s || s.ok === false) return;
+        /* host prefsSet 经 prefsOut 自愈回包（pickerDir 为空时回 desktopDir），
+         * s.pickerDir 恒非空——直接赋值（原先的 || dirPicker.defDir 是死分支） */
+        ((dirPicker.defDir = s.pickerDir),
+          (dirPicker.defCustom = !!s.custom),
+          bus.fire(DIRPICKER_CHAN));
+      },
+      () => {},
+    );
+  },
+  nav(t, e) {
+    const s = e || ++dirPicker.seq;
+    if (t === null && dirPicker.defDir === null) {
+      /* 首开且偏好未载：先拉默认目录再导航；拉取失败不挡路，空串由 host 回落 home */
+      ((dirPicker.loading = !0), (dirPicker.error = null), bus.fire(DIRPICKER_CHAN));
+      host.call("workbench.prefsGet", {}).then(
+        (o) => {
+          if (s !== dirPicker.seq || !dirPicker.req) return;
+          ((dirPicker.defDir = (o && o.pickerDir) || ""),
+            (dirPicker.defCustom = !!(o && o.custom)),
+            dirPicker.nav(dirPicker.defDir, s));
+        },
+        () => {
+          if (s !== dirPicker.seq || !dirPicker.req) return;
+          ((dirPicker.defDir = ""), dirPicker.nav("", s));
+        },
+      );
+      return;
+    }
+    const p = t === null ? dirPicker.defDir : t;
+    ((dirPicker.loading = !0), (dirPicker.error = null), bus.fire(DIRPICKER_CHAN));
+    host.call("workbench.listDir", { path: p }).then(
+      (o) => {
+        if (s !== dirPicker.seq || !dirPicker.req) return;
+        if (o && o.error) {
+          /* 目录不可读：留在原位，错误内联展示（对齐 pi-web），输入框保持用户所敲 */
+          ((dirPicker.loading = !1), (dirPicker.error = String(o.error)), bus.fire(DIRPICKER_CHAN));
+          return;
+        }
+        ((dirPicker.path = (o && o.path) || p),
+          (dirPicker.parent = (o && o.parent) || null),
+          (dirPicker.input = dirPicker.path),
+          (dirPicker.entries = ((o && o.entries) || []).filter(
+            (a) => a.type === "directory",
+          )),
+          (dirPicker.loading = !1),
+          bus.fire(DIRPICKER_CHAN));
+      },
+      (o) => {
+        if (s !== dirPicker.seq || !dirPicker.req) return;
+        ((dirPicker.loading = !1),
+          (dirPicker.error = String((o && o.message) || o)),
+          bus.fire(DIRPICKER_CHAN));
+      },
+    );
+  },
+  /* 关闭并结算：commit 取当前 path，否则 null。bump 代际使在途导航回包失效 */
+  settle(t) {
+    const e = dirPicker.req;
+    if (!e) return;
+    (++dirPicker.seq, (dirPicker.req = null), bus.fire(DIRPICKER_CHAN), e.resolve(t ? dirPicker.path : null));
+  },
+};
+const pickDir = (t) => dirPicker.open(t);
+function DirPickerHost() {
+  const t = React.createElement,
+    [, e] = React.useState(0);
+  React.useEffect(() => bus.sub(() => e((s) => s + 1), DIRPICKER_CHAN), []);
+  const s = dirPicker.req;
+  if (!s) return null;
+  /* 输入框有未提交改动时禁用"选择"（对齐 pi-web：先打开再选，防误选旧目录） */
+  const o = dirPicker.input.trim() !== dirPicker.path,
+    a = !!dirPicker.path && !o && !dirPicker.loading,
+    /* 星钮三态：非默认（可设为默认）/ 自定义默认（再点恢复桌面）/ 桌面回落默认（禁用展示） */
+    i = !!dirPicker.path && dirPicker.path === dirPicker.defDir,
+    l = i && !dirPicker.defCustom;
+  return t(
+    "div",
+    {
+      className: "pw-dpk-mask",
+      onClick: (i) => {
+        i.target === i.currentTarget && dirPicker.settle(false);
+      },
+      /* Esc 经冒泡捕获（输入框 autoFocus，按键事件沿虚拟 DOM 上溯） */
+      onKeyDown: (i) => {
+        i.key === "Escape" && dirPicker.settle(false);
+      },
+    },
+    t(
+      "div",
+      { className: "pw-dpk-panel" },
+      t(
+        "div",
+        { className: "pw-dpk-head" },
+        t("span", { className: "pw-dpk-title" }, s.title),
+        t(
+          "button",
+          {
+            className: "pw-dpk-x",
+            title: "关闭",
+            onClick: () => dirPicker.settle(false),
+          },
+          "×",
+        ),
+      ),
+      t(
+        "div",
+        { className: "pw-dpk-bar" },
+        t(
+          "button",
+          {
+            className: "pw-dpk-up",
+            disabled: dirPicker.loading || !dirPicker.parent,
+            title: "上级目录",
+            onClick: () =>
+              dirPicker.parent && dirPicker.nav(dirPicker.parent),
+          },
+          ic([["p", "m18 15-6-6-6 6"]], 15),
+        ),
+        t("input", {
+          className: "pw-dpk-path",
+          value: dirPicker.input,
+          autoFocus: !0,
+          autoComplete: "off",
+          spellCheck: !1,
+          placeholder: "/path/to/project 或 ~/project",
+          onChange: (i) => {
+            ((dirPicker.input = i.target.value),
+              (dirPicker.error = null),
+              bus.fire(DIRPICKER_CHAN));
+          },
+          onKeyDown: (i) => {
+            if (i.key === "Enter") {
+              const l = dirPicker.input.trim();
+              l && dirPicker.nav(l);
+            }
+          },
+        }),
+        t(
+          "button",
+          {
+            className: "pw-dpk-go",
+            disabled: dirPicker.loading || !dirPicker.input.trim(),
+            onClick: () => {
+              const i = dirPicker.input.trim();
+              i && dirPicker.nav(i);
+            },
+          },
+          "前往",
+        ),
+      ),
+      t(
+        "div",
+        { className: "pw-dpk-list" },
+        dirPicker.loading
+          ? t("div", { className: "pw-dpk-hint" }, "加载目录…")
+          : dirPicker.entries.length
+            ? dirPicker.entries.map((i) =>
+                t(
+                  "button",
+                  {
+                    key: i.path,
+                    className: "pw-dpk-row",
+                    title: i.path,
+                    onClick: () => dirPicker.nav(i.path),
+                  },
+                  FolderIcon(12),
+                  t("span", { className: "pw-dpk-name" }, i.name),
+                ),
+              )
+            : t("div", { className: "pw-dpk-hint" }, "没有子目录"),
+        dirPicker.error
+          ? t("div", { className: "pw-dpk-err" }, dirPicker.error)
+          : null,
+      ),
+      t(
+        "div",
+        { className: "pw-dpk-foot" },
+        t(
+          "button",
+          {
+            className: "pw-dpk-star" + (i ? " on" : ""),
+            disabled: l,
+            title: i
+              ? dirPicker.defCustom
+                ? "当前即默认打开目录，点击恢复默认（桌面）"
+                : "默认打开目录（桌面）；进入其他目录可设为默认"
+              : "把当前目录设为默认打开目录",
+            onClick: () => dirPicker.toggleDefault(),
+          },
+          ic(
+            [
+              [
+                "p",
+                "M12 2l2.9 6.3 6.6 1-5 4.8 1.4 6.9L12 17.8 6.1 21l1.4-6.9-5-4.8 6.6-1z",
+              ],
+            ],
+            12,
+          ),
+          i ? "默认目录" : "设为默认",
+        ),
+        t(
+          "div",
+          { className: "pw-dpk-foot-r" },
+          t(
+            "button",
+            {
+              className: "pw-dpk-cancel",
+              onClick: () => dirPicker.settle(false),
+            },
+            "取消",
+          ),
+          t(
+            "button",
+            {
+              className: "pw-dpk-ok",
+              disabled: !a,
+              title: o ? "先回车或点「前往」打开输入的路径" : "选择当前目录",
+              onClick: () => a && dirPicker.settle(true),
+            },
+            "选择此文件夹",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/* ============================ 便签（Typora 风格编辑即预览） ============================
+ * 纯粹的 Markdown 实时编辑预览区：所见即所得，粘图片即是图片，无多余编辑/完成按钮，无底部冗余状态行；
+ * 顶栏极简（左侧 + 图标、紧凑搜索框、AI 生成标题；右侧与侧边栏同款 ChevronDown SVG 图标）；
+ * 整体配色与 dsh-geek-sidebar 100% 统一（基于 --dsw-alias-bg-base 与标准 1px 分割线，无杂乱色块）；
+ * 便签项悬停展现与侧栏统一尺寸位置的标准按钮（@、改名、删除）；纵向分割线与顶边拖拽线采用标准 1px 细线风格。 */
+
+function NotebookIcon(t) {
   return ic(
     [
-      ["p", "M12 8V4H8"],
-      [
-        "p",
-        "M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z",
-      ],
-      ["p", "M2 14h2"],
-      ["p", "M20 14h2"],
-      ["p", "M9 13v2"],
-      ["p", "M15 13v2"],
+      ["r", 4, 3, 16, 18, 2, 2],
+      ["l", 8, 3, 8, 21],
+      ["l", 12, 8, 16, 8],
+      ["l", 12, 12, 16, 12],
     ],
     t,
   );
 }
 
-/* ==================== ACP 智能体 tabs（Kimi Code）：连接存储层 + 视图 ====================
- * 架构：WS 连接与全部会话状态放在纯 JS 的 AcpClient（不挂 React 生命周期）——
- * 面板关闭/切 tab 组件卸载，连接和 agent 进程照样活着，tab 状态点与侧栏"助手"
- * 徽标因此是实时值。只有 tab 上的 × 会断 WS（host 30s 宽限后回收进程）。
- * 状态机：connecting → idle ⇄ running ⇄ waiting（权限卡）→ idle；dead（退出/失败）可重连。
- * bus.fire 做 50ms 节流：流式 chunk 高频到达，避免每个 token 都全量重渲染。 */
-
-/* content → 纯文本（模块级：acpApplyUpdate 与 AcpClient.applyUpdate 的压缩吸收共用）。
- * 工具调用的 content 是双层包装 {type:'content', content:{type:'text',text}}（实测），须先剥内层 */
-const acpTextOf = (c) => {
-  if (!c) return "";
-  if (typeof c === "string") return c;
-  if (Array.isArray(c)) return c.map(acpTextOf).join("");
-  const inner = c.content && typeof c.content === "object" ? acpTextOf(c.content) : "";
-  return inner || String(c.text || "");
-};
-
-/* update 事件 → 流式列表项（append/merge 规则集中在这一处；副作用类 update 走 applyUpdate） */
-function acpApplyUpdate(items, update) {
-  const kind = update && update.sessionUpdate;
-  const content = update && update.content;
-  const textOf = acpTextOf;
-  /* 工具关键参数提取（实测形状）：locations[0].path 最可靠（completed 时才有）；
-   * 其次 in_progress 阶段 content 文本是 input JSON 的完整前缀快照（覆盖语义，非 delta）；
-   * 再其次 diff 类条目把 path 放在条目级。 */
-  const argOf = (u) => {
-    const loc = u && u.locations && u.locations[0] && u.locations[0].path;
-    if (loc) return String(loc);
-    const cl = u && u.content;
-    if (Array.isArray(cl)) {
-      for (const it of cl) if (it && typeof it.path === "string" && it.path) return it.path;
-    }
-    const t = textOf(cl);
-    if (!t) return "";
-    try {
-      const j = JSON.parse(t);
-      return String(j.path || j.command || j.file_path || j.filePath || j.query || j.pattern || j.url || j.cmd || "");
-    } catch (e) {
-      return "";
-    }
-  };
-  const next = items.slice();
-  const appendText = (k, t) => {
-    if (next.length && next[next.length - 1].kind === k) {
-      next[next.length - 1] = Object.assign({}, next[next.length - 1], { text: next[next.length - 1].text + t });
-    } else {
-      next.push({ key: next.length, kind: k, text: t });
-    }
-  };
-  if (kind === "user_message_chunk") appendText("user", textOf(content));
-  else if (kind === "agent_message_chunk") appendText("agent", textOf(content));
-  else if (kind === "agent_thought_chunk") appendText("thought", textOf(content));
-  else if (kind === "tool_call") {
-    next.push({
-      key: next.length,
-      kind: "tool",
-      id: update.toolCallId,
-      title: update.title || "工具调用",
-      status: update.status || "pending",
-      arg: argOf(update),
-      output: "",
-    });
-  } else if (kind === "tool_call_update") {
-    const i = next.findIndex((x) => x.kind === "tool" && x.id === update.toolCallId);
-    if (i >= 0) {
-      const cur = next[i];
-      const done = update.status === "completed" || update.status === "failed";
-      next[i] = Object.assign({}, cur, {
-        status: update.status || cur.status,
-        title: update.title || cur.title,
-        arg: argOf(update) || cur.arg,
-        /* 完成帧的 content/rawOutput 才是工具输出；进行中的 content 只是 input 快照，不入 output */
-        output: done ? (typeof update.rawOutput === "string" && update.rawOutput ? update.rawOutput : textOf(update.content)) || cur.output : cur.output,
-      });
-    }
-  } else if (kind === "plan") {
-    const entries = (update.entries || []).map((en) => (en.status === "completed" ? "☑ " : en.status === "in_progress" ? "▶ " : "☐ ") + (en.content || ""));
-    next.push({ key: next.length, kind: "plan", text: entries.join("\n") });
-  }
-  return next;
-}
-
-/* 压缩通知剥离（kimi 0.37 实测三种形态）：
- * - 回放/auto-compaction：通知 chunk 并入上一条回复的 agent 条目尾部，无法按条目剔除；
- * - 完整形态 "Context compaction started … Tokens after: N"，或裸 "Compaction completed/cancelled."（轮后片段）；
- * - 故渲染层取两类起点中较早者截到通知尾（有 Tokens after 则保其后的文本），前缀真实回复保留。
- *   实时手动压缩走 compacting 缓冲，不进流、无需此兜底 */
-const stripCompactNotice = (t) => {
-  const s = String(t || "");
-  let i = s.indexOf("Context compaction started");
-  const j = s.search(/Compaction (?:completed|cancelled)\./);
-  if (j >= 0 && (i < 0 || j < i)) i = j;
-  if (i < 0) return t;
-  const rest = s.slice(i);
-  const m = /Tokens after:\s*[\d,]+/.exec(rest);
-  return s.slice(0, i) + (m ? rest.slice(m.index + m[0].length) : "");
-};
-
-const ACP_STATUS = {
-  connecting: { label: "连接中" },
-  idle: { label: "空闲" },
-  running: { label: "运行中" },
-  waiting: { label: "待交互" },
-  dead: { label: "已退出" },
-};
-
-/* 工具调用状态中文化（kimi 原值 pending/in_progress/completed/failed） */
-const TOOL_STATUS = { pending: "等待", in_progress: "运行中", completed: "完成", failed: "失败" };
-/* 工具参数显示缩短：路径留末两段，非路径（如命令行）原样交给 CSS 省略 */
-const shortArg = (p) => {
-  const s = String(p || "");
-  if (s.indexOf("/") < 0) return s;
-  const seg = s.split("/").filter(Boolean);
-  return seg.length > 2 ? "…/" + seg.slice(-2).join("/") : s;
-};
-
-class AcpClient {
-  constructor(tabId, cwd) {
-    this.tabId = tabId;
-    this.cwd = cwd;
-    this.status = "connecting";
-    this.items = [];
-    this.sessionId = null;
-    this.compacting = false; /* 压缩轮：通知文本属元信息，缓冲到 compactText 不入流 */
-    this.compactText = null;
-    this._compactTimer = 0; /* 压缩态兜底定时器（120s 自复位） */
-    this.modes = null; /* session/new 的 modes（default/plan/auto/yolo） */
-    this.configOptions = null; /* configOptions（model/thinking/mode 选择器数据源） */
-    this.capabilities = null; /* agentCapabilities（image 等） */
-    this.usage = null; /* usage_update：{used,size} */
-    this.commands = []; /* available_commands_update：斜杠命令 */
-    this.title = ""; /* session_info_update */
-    this.perm = null;
-    this.fatal = null;
-    this.sessions = null; /* session/list 结果（不过滤，渲染时按 cwd 过滤） */
-    this.historyBusy = false;
-    this.queue = []; /* 后续消息队列 {text,images}：运行中入队，回 idle 自动补发 */
-    this.steer = null; /* 待引导消息：cancel 当前轮后回发 */
-    this.intentionalClose = false;
-    this._fireT = 0;
-    this.connect();
-  }
-  /* 50ms 节流 fire：流式更新合并成约 20fps 的重渲染。
-   * hot=true 走 "acp" 频道（评审修复：chunk 不再扇出到侧栏/详情）；同一节流窗口内
-   * 出现非热事件即升级为全局 fire——FootBar 徽标等全局订阅者不会错过状态跳变 */
-  fire(hot) {
-    if (!hot) this._fireGlobal = true;
-    if (this._fireT) return;
-    this._fireT = setTimeout(() => {
-      this._fireT = 0;
-      const g = this._fireGlobal;
-      this._fireGlobal = false;
-      g ? bus.fire() : bus.fire("acp");
-    }, 50);
-  }
-  connect() {
-    this.intentionalClose = false;
-    this.status = "connecting";
-    this.fatal = null;
-    const u = new URL("/__dsh-geek-sidebar__/wb/acp-ws", location.origin);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    u.search = new URLSearchParams({ agent: "kimi", session: this.tabId, cwd: this.cwd }).toString();
-    /* 评审修复：socket 代际号——重连/手动 reconnect 后，旧 socket 晚到的 onmessage/onclose
-     * 不得写新连接的状态（旧版无守卫：旧 close 会把新态误置 dead 并多排一次退避，双连接
-     * 并存时 replay/update 还会交错进同一份 items） */
-    const gen = (this._gen = (this._gen || 0) + 1);
-    const ws = new WebSocket(u.toString());
-    this.ws = ws;
-    ws.onmessage = (ev) => {
-      if (gen !== this._gen) return;
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      if (msg.type === "hello") {
-        const sameSession = !!(this.sessionId && msg.sessionId === this.sessionId);
-        this.sessionId = msg.sessionId;
-        this.modes = msg.modes || null;
-        this.configOptions = msg.configOptions || null;
-        this.capabilities = msg.capabilities || null;
-        if (this.status === "connecting") this.status = "idle";
-        /* 重连成功：复位退避计数 */
-        this._rcAttempt = 0;
-        this.reconnecting = 0;
-        if (this._rcTimer) {
-          clearTimeout(this._rcTimer);
-          this._rcTimer = 0;
-        }
-        /* 刷新恢复/断线回捞（resumeRecent）：拉会话列表，sessions 帧里回捞该目录最近一条有标题会话。
-         * 同进程重挂（sessionId 未变）除外——replay 会补齐，不许 load 走当前会话 */
-        if (this.resumeRecent) {
-          this.resumeRecent = false;
-          if (!sameSession) {
-            this.resumePick = true;
-            this.ws.send(JSON.stringify({ type: "list_sessions" }));
-          }
-        }
-        this._flushQueue(); /* dead 期排队的消息：连回即补发 */
-      } else if (msg.type === "replay") {
-        for (const u2 of msg.events || []) this.applyUpdate(u2);
-      } else if (msg.type === "update") {
-        this.applyUpdate(msg.update);
-      } else if (msg.type === "turn_end") {
-        if (this.status === "running" || this.status === "waiting") this.status = "idle";
-        /* 注意：不在此清压缩态——实测 kimi 的 /compact 轮次 ~50ms 即 turn_end（仅应答），
-         * 压缩本体在后台跑，完成/取消文本轮后才到（大上下文可达 ~10s）。收场由
-         * applyUpdate 见到 completed/cancelled 文本触发，120s 定时兜底 */
-        this._flushQueue();
-      } else if (msg.type === "permission") {
-        this.perm = { requestId: msg.requestId, title: msg.title, options: msg.options || [] };
-        this.status = "waiting";
-      } else if (msg.type === "sessions") {
-        /* 空白对话（title 空 = 从未提问）直接删除、不进历史。两道边界（均实测）：
-         * 1) kimi 的 session/delete 只能删本进程 cwd 的会话，跨 cwd 必回 Internal error → 只扫同 cwd，
-         *    异 cwd 空白保留在列表数据里（渲染层本来也按 cwd 过滤），等那个目录的 tab 开历史时自清理；
-         * 2) 豁免所有存活 tab 的当前会话——它可能正空白等输入，删了下条 prompt 会失效。
-         * 清扫删除带 silent：家务操作，失败（理论上不该再有）也不许污染对话流。 */
-        const liveIds = Object.keys(acpTabs.clients)
-          .map((k) => acpTabs.clients[k] && acpTabs.clients[k].sessionId)
-          .filter(Boolean);
-        const keep = [];
-        for (const s of msg.sessions || []) {
-          const blank = s && s.sessionId && !(s.title && String(s.title).trim());
-          if (blank && s.cwd === this.cwd && liveIds.indexOf(s.sessionId) < 0) {
-            this.ws.send(JSON.stringify({ type: "delete_session", sessionId: s.sessionId, silent: true }));
-          } else keep.push(s);
-        }
-        this.sessions = keep;
-        this.historyBusy = false;
-        /* 刷新恢复的回捞：最近一条有标题、非当前、未被其他恢复 tab 认领的同 cwd 会话 */
-        if (this.resumePick) {
-          this.resumePick = false;
-          const cand = keep
-            .filter((s) => s && s.sessionId && s.cwd === this.cwd && s.title && String(s.title).trim() && s.sessionId !== this.sessionId && acpResumedIds.indexOf(s.sessionId) < 0)
-            .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
-          if (cand) {
-            acpResumedIds.push(cand.sessionId);
-            this.loadSession(cand.sessionId, true); /* keepQueue：断线期排队的消息在 loaded 后补发 */
-          }
-        }
-      } else if (msg.type === "loaded") {
-        /* 换会话：清空流，kimi 随后以 update 帧回放历史 */
-        this.items = [];
-        this.sessionId = msg.sessionId;
-        this.perm = null;
-        this.usage = null;
-        this._clearCompacting();
-        if (this.status !== "dead") this.status = "idle";
-        this._flushQueue(); /* 回捞完成后补发断线期排队消息（用户主动换会话时队列已清空，空转） */
-      } else if (msg.type === "config") {
-        if (msg.sessionId) this.sessionId = msg.sessionId;
-        if (msg.modes) this.modes = msg.modes;
-        if (msg.configOptions) this.configOptions = msg.configOptions;
-      } else if (msg.type === "session_deleted") {
-        if (this.sessions) this.sessions = this.sessions.filter((s) => s && s.sessionId !== msg.sessionId);
-      } else if (msg.type === "note") {
-        this.items = this.items.concat({ key: this.items.length, kind: "note", text: msg.message });
-      } else if (msg.type === "error") {
-        this.items = this.items.concat({ key: this.items.length, kind: "error", text: msg.message });
-        if (this.status === "running" || this.status === "waiting") this.status = "idle";
-        this._clearCompacting();
-        this._flushQueue();
-      } else if (msg.type === "exit") {
-        this.status = "dead";
-        this._clearCompacting();
-        this.items = this.items.concat({ key: this.items.length, kind: "error", text: "进程已退出（code " + msg.code + "）" });
-      }
-      /* 纯流式增量标 hot 走 "acp" 频道（评审修复）：chunk/usage 是 20fps 源，
-       * 侧栏/详情无需随之重渲染；其余（hello/turn_end/permission/sessions/exit…）
-       * 保持全局 fire——FootBar 徽标与 tab 列表靠状态跳变 */
-      const su = msg.type === "update" && msg.update && msg.update.sessionUpdate;
-      this.fire(su === "agent_message_chunk" || su === "agent_thought_chunk" || su === "usage_update");
-    };
-    ws.onclose = (ev) => {
-      if (gen !== this._gen) return;
-      if (ev.code === 1011 && ev.reason) this.fatal = ev.reason;
-      this._clearCompacting();
-      if (!this.intentionalClose) {
-        this.status = "dead";
-        this._scheduleReconnect(); /* 异常断线：指数退避自动重连（dsh 重启/网络抖动无感恢复） */
-      }
-      this.fire();
-    };
-    ws.onerror = () => {};
-    this.fire();
-  }
-  /* session/update：副作用类本地吸收，流式类交给 acpApplyUpdate */
-  applyUpdate(u) {
-    const kind = u && u.sessionUpdate;
-    if (kind === "usage_update") this.usage = { used: u.used || 0, size: u.size || 0 };
-    else if (kind === "available_commands_update") this.commands = u.availableCommands || [];
-    else if (kind === "session_info_update") this.title = u.title || "";
-    else if (kind === "current_mode_update" && u.currentModeId) {
-      if (this.modes) this.modes = Object.assign({}, this.modes, { currentModeId: u.currentModeId });
-      else this.modes = { currentModeId: u.currentModeId, availableModes: [] };
-    } else if (kind === "config_option_update" && Array.isArray(u.configOptions)) {
-      this.configOptions = u.configOptions;
-    } else if (this.compacting && (kind === "agent_message_chunk" || kind === "agent_thought_chunk")) {
-      /* 压缩通知吸收（kimi 0.37 实测：started 应答在轮内，completed/cancelled 在轮后到达，
-       * 均属元信息不是对话内容，用户决策不展示）：入缓冲不入流，
-       * 见到完成/取消文本立即收场——此后若有真实回复 chunk（压缩期间又发了新消息）正常入流 */
-      this.compactText = (this.compactText || "") + acpTextOf(u.content);
-      if (/Compaction (?:completed|cancelled)\./.test(this.compactText)) this._clearCompacting();
-    } else if (kind === "user_message_chunk" && acpTextOf(u.content).trim() === "/compact") {
-      /* kimi 侧 /compact 回声（实时或回放）同样吞掉——压缩命令本身也不进对话 */
-    } else {
-      this.items = acpApplyUpdate(this.items, u);
-    }
-  }
-  open() {
-    return this.ws && this.ws.readyState === 1;
-  }
-  /* 压缩态跨轮持有：/compact 轮次仅应答（实测 ~50ms 即 turn_end），压缩本体后台运行，
-   * 完成/取消文本轮后才到。收场三途：见到 Compaction completed/cancelled 文本、
-   * error/loaded/断线清场、120s 定时兜底（kimi 异常静默时不至于卡红钮） */
-  _markCompacting() {
-    this.compacting = true;
-    this.compactText = "";
-    if (this._compactTimer) clearTimeout(this._compactTimer);
-    this._compactTimer = setTimeout(() => {
-      this._compactTimer = 0;
-      this._clearCompacting();
-      this.fire();
-    }, 120000);
-  }
-  _clearCompacting() {
-    this.compacting = false;
-    this.compactText = null;
-    if (this._compactTimer) {
-      clearTimeout(this._compactTimer);
-      this._compactTimer = 0;
-    }
-  }
-  sendPrompt(text, images) {
-    if (!this.open() || this.status === "running" || this.status === "waiting" || this.status === "dead") return;
-    const imgs = (images || []).filter((im) => im && im.data).map((im) => ({ data: im.data, mimeType: im.mimeType }));
-    if (!String(text || "").trim() && !imgs.length) return;
-    this.ws.send(JSON.stringify({ type: "prompt", text: text || "", images: imgs.length ? imgs : undefined }));
-    /* /compact：标记压缩态（通知不回流），本地用户回声也不插——命令本身不污染对话 */
-    if (String(text || "").trim() === "/compact") {
-      this._markCompacting();
-    } else {
-      this.items = this.items.concat({
-        key: this.items.length,
-        kind: "user",
-        text: text || "",
-        images: (images || []).map((im) => ({ url: im.url })),
-      });
-    }
-    this.status = "running";
-    this.perm = null;
-    this.fire();
-  }
-  cancel() {
-    if (this.open()) this.ws.send(JSON.stringify({ type: "cancel" }));
-  }
-  /* 后续消息排队 / 立即引导（参考 Cursor 交互，用户决策 2026-08）。纯客户端编排，
-   * 不赌 ACP 中途 prompt 行为：排队=入队后等 turn_end/error 回 idle 自动补发；
-   * 引导=cancel 当前轮，轮次结束回发引导文本（等效"打断并转向"）。 */
-  enqueue(text, images) {
-    this.queue = this.queue.concat({ text: String(text || ""), images: images || [] });
-    this.fire();
-  }
-  popQueue() {
-    const m = this.queue[this.queue.length - 1];
-    this.queue = this.queue.slice(0, -1);
-    this.fire();
-    return m || null;
-  }
-  steerNow(text, images) {
-    if (this.status === "running" || this.status === "waiting") {
-      this.steer = { text: String(text || ""), images: images || [] };
-      this.cancel();
-    } else this.sendPrompt(text, images);
-  }
-  _flushQueue() {
-    if (this.status !== "idle" || !this.open()) return;
-    let m = this.steer;
-    this.steer = null;
-    if (!m && this.queue.length) m = this.queue[0];
-    if (!m) return;
-    if (this.queue[0] === m) this.queue = this.queue.slice(1);
-    this.sendPrompt(m.text, m.images);
-  }
-  answerPermission(requestId, optionId) {
-    if (this.open()) this.ws.send(JSON.stringify({ type: "permission", requestId, optionId }));
-    this.perm = null;
-    if (this.status === "waiting") this.status = "running";
-    this.fire();
-  }
-  setMode(modeId) {
-    if (this.open() && modeId) this.ws.send(JSON.stringify({ type: "set_mode", modeId }));
-  }
-  setConfig(configId, value) {
-    if (this.open() && configId) this.ws.send(JSON.stringify({ type: "set_config", configId, value }));
-  }
-  listSessions() {
-    if (!this.open()) return;
-    this.historyBusy = true;
-    this.ws.send(JSON.stringify({ type: "list_sessions" }));
-    this.fire();
-  }
-  loadSession(sessionId, keepQueue) {
-    if (!this.open() || !sessionId || sessionId === this.sessionId || this.status === "running") return;
-    if (!keepQueue) {
-      this.queue = []; /* 用户主动换会话：队列属于旧会话上下文，即清空 */
-      this.steer = null;
-    }
-    this.ws.send(JSON.stringify({ type: "load_session", sessionId }));
-    this.status = "connecting";
-    this.perm = null;
-    this.fire();
-  }
-  /* 会话操作三件套：运行/等待中禁止（new/fork 会换 sessionId，中途换会出乱） */
-  busy() {
-    return this.status === "running" || this.status === "waiting" || this.status === "connecting" || this.status === "dead";
-  }
-  newSession() {
-    if (!this.open() || this.busy()) return;
-    this.queue = []; /* 同上：新会话不继承旧队列 */
-    this.steer = null;
-    this.ws.send(JSON.stringify({ type: "new_session" }));
-  }
-  forkSession() {
-    if (!this.open() || this.busy()) return;
-    this.ws.send(JSON.stringify({ type: "fork_session" }));
-  }
-  deleteSession(sessionId) {
-    if (!this.open() || !sessionId || sessionId === this.sessionId) return;
-    this.ws.send(JSON.stringify({ type: "delete_session", sessionId }));
-  }
-  /* 关 tab 前调用：本会话从未提问（无 user 条目——本地发送/回放/重连三路径都会留下 user
-   * 条目，判据可靠）则直接删除，不留历史空白。注意 deleteSession() 拒删当前会话，这里须绕开。 */
-  discardIfBlank() {
-    if (!this.sessionId || !this.open()) return;
-    if (this.items.some((it) => it && it.kind === "user")) return;
-    this.ws.send(JSON.stringify({ type: "delete_session", sessionId: this.sessionId, silent: true }));
-  }
-  /* 自动重连（用户决策 2026-08）：1s→2s→4s→8s 封顶，最多 12 次（约 93s 窗口，覆盖 dsh 重启）。
-   * 成功由 hello 复位计数；放弃后保留 dead 横幅，手动按钮仍可立即重连。 */
-  _scheduleReconnect() {
-    if (this._rcTimer) return;
-    const attempt = (this._rcAttempt || 0) + 1;
-    if (attempt > 12) {
-      this.reconnecting = 0;
-      return;
-    }
-    this._rcAttempt = attempt;
-    this.reconnecting = attempt;
-    this._rcTimer = setTimeout(
-      () => {
-        this._rcTimer = 0;
-        this.reconnect();
-      },
-      Math.min(1000 * Math.pow(2, attempt - 1), 8000),
-    );
-  }
-  reconnect() {
-    if (this._rcTimer) {
-      clearTimeout(this._rcTimer);
-      this._rcTimer = 0;
-    }
-    this._rcAttempt = 0;
-    this.reconnecting = 0;
-    /* 同进程重挂：hello 同 sessionId 自动取消回捞；新进程：回捞最近历史会话 */
-    this.resumeRecent = true;
-    this.connect();
-  }
-  close() {
-    this.intentionalClose = true;
-    this._gen = (this._gen || 0) + 1; /* 评审修复：close 后晚到帧一并作废（同代际守卫） */
-    if (this._rcTimer) {
-      clearTimeout(this._rcTimer);
-      this._rcTimer = 0;
-    }
-    try {
-      this.ws && this.ws.close();
-    } catch (e) {}
-  }
-}
-
-/* tab 列表 localStorage 持久化（用户要求 2026-08：刷新不丢已选目录）。
- * 仅存 {id,cwd}；无 window 环境（无头冒烟）安全降级为空操作。 */
-const ACP_LS_KEY = "pw-acp-tabs";
-const acpLs = {
-  read() {
-    try {
-      if (typeof window === "undefined") return [];
-      const v = JSON.parse(window.localStorage.getItem(ACP_LS_KEY) || "[]");
-      return Array.isArray(v) ? v : [];
-    } catch (e) {
-      return [];
-    }
-  },
-  write(tabs) {
-    try {
-      if (typeof window === "undefined") return;
-      window.localStorage.setItem(ACP_LS_KEY, JSON.stringify(tabs.map((t) => ({ id: t.id, cwd: t.cwd }))));
-    } catch (e) {}
-  },
-};
-/* 恢复回捞的会话认领表：多个恢复 tab 同目录时不许抢同一条历史会话 */
-const acpResumedIds = [];
-
-/* 智能体 tab 注册表：tab 元信息 + 各 tab 的 AcpClient。 */
-const acpTabs = {
-  seq: 0,
-  tabs: [] /* {id,cwd,name} */,
-  clients: {} /* id -> AcpClient */,
-  add(cwd) {
-    const id = "k" + Date.now().toString(36) + ++acpTabs.seq;
-    acpTabs.clients[id] = new AcpClient(id, cwd);
-    acpTabs.tabs = acpTabs.tabs.concat({ id, cwd, name: baseName(cwd) || cwd });
-    acpLs.write(acpTabs.tabs);
-    bottomPanel.set({ open: true, tab: id });
-    bus.fire();
-    return id;
-  },
-  close(id) {
-    const c = acpTabs.clients[id];
-    if (c) {
-      try {
-        c.discardIfBlank();
-        c.close();
-      } catch (e) {}
-    }
-    delete acpTabs.clients[id];
-    acpTabs.tabs = acpTabs.tabs.filter((t) => t.id !== id);
-    acpLs.write(acpTabs.tabs);
-    if (bottomPanel.tab === id) bottomPanel.set({ tab: "terminal" });
-    bus.fire();
-  },
-  counts() {
-    let run = 0,
-      wait = 0;
-    for (const t of acpTabs.tabs) {
-      const c = acpTabs.clients[t.id];
-      if (!c) continue;
-      if (c.status === "running") run++;
-      else if (c.status === "waiting") wait++;
-    }
-    return { run, wait, total: acpTabs.tabs.length };
-  },
-};
-
-/* 刷新恢复：重建上次的 tab（上限 6 个防爆量），AcpClient 重连后回捞该目录最近一条
- * 有标题会话（session/load 回放完整历史，对话不丢）。纯客户端方案，无需 host 改动；
- * 重建时新建的空白会话交给历史面板的空白清扫兜底。 */
-function acpRestore() {
-  if (typeof window === "undefined") return;
-  const saved = acpLs.read();
-  for (const t of saved.slice(0, 6)) {
-    if (!t || typeof t.cwd !== "string" || !t.cwd) continue;
-    const id = typeof t.id === "string" && t.id && !acpTabs.clients[t.id] ? t.id : "k" + Date.now().toString(36) + ++acpTabs.seq;
-    const c = new AcpClient(id, t.cwd);
-    c.resumeRecent = true;
-    acpTabs.clients[id] = c;
-    acpTabs.tabs = acpTabs.tabs.concat({ id, cwd: t.cwd, name: baseName(t.cwd) || t.cwd });
-  }
-  if (acpTabs.tabs.length) bus.fire();
-}
-acpRestore();
-
-/* 单个智能体 tab 的视图：头部（状态/模式/模型/thinking/历史）+ 用量条 + 流 + 权限卡 + 输入行 */
-function AgentTabView({ client }) {
-  const e = React.createElement;
-  const [, force] = React.useState(0);
-  /* "acp" 频道订阅（评审修复：bus 拆分后唯一需要随流式 chunk 重渲染的视图；
-   * 全局 fire 按语义仍会送达本频道——store/bottomPanel 等稀有事件不丢） */
-  React.useEffect(() => bus.sub(() => force((x) => x + 1), "acp"), []);
-  const [draft, setDraft] = React.useState("");
-  const [images, setImages] = React.useState([]); /* {url,data,mimeType}，最多 4 张 */
-  const [histOpen, setHistOpen] = React.useState(false);
-  /* 评审修复：两击确认收敛 06-misc 共享状态机（原手抄 useState；id=sessionId，适配器保持原签名） */
-  const cf = useTwoClick();
-  const delId = cf[0], setDelId = (id) => (id == null ? cf[2]() : cf[1](id));
-  const [slashIdx, setSlashIdx] = React.useState(0);
-  const [slashOff, setSlashOff] = React.useState(false); /* Esc 关闭补全弹窗，继续输入自动复位 */
-  const [usageOpen, setUsageOpen] = React.useState(false); /* 上下文用量浮层 */
-  const [copiedKey, setCopiedKey] = React.useState(null); /* 消息操作条「已复制」反馈（按 item.key） */
-  const scrollRef = React.useRef(null);
-  const fileRef = React.useRef(null);
-  /* 自动滚动信号 = 条数 + 末条文本长度：流式 chunk 并入末条（appendText 合并）时
-   * items.length 不变，只盯条数会长回复流式期间不滚动（评审修复） */
-  const lastIt = client.items[client.items.length - 1];
-  const scrollSig = client.items.length + ":" + (lastIt && lastIt.text ? lastIt.text.length : 0);
-  React.useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [scrollSig]);
-  /* usage/历史两浮层的外点与 Esc 收回：pointerdown 早于按钮 click，命中自身
-   * 控件（closest 命中）时忽略——开关按钮自身的切换逻辑不受影响；点控制行
-   * 其他按钮（新对话/分叉/下拉）同样收回浮层。 */
-  React.useEffect(() => {
-    if (!usageOpen && !histOpen) return undefined;
-    const onDown = (ev) => {
-      const t = ev.target;
-      if (t && typeof t.closest === "function"
-        && (t.closest(".pw-acp-usage") || t.closest(".pw-acp-pop")
-          || t.closest(".pw-acp-hist-btn") || t.closest(".pw-acp-hist"))) return;
-      setUsageOpen(false);
-      setHistOpen(false);
-    };
-    const onKey = (ev) => {
-      if (ev.key === "Escape") { setUsageOpen(false); setHistOpen(false); }
-    };
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [usageOpen, histOpen]);
-  /* configOptions 里的三个 select 数据源（kimi 0.36 实测：model/thinking/mode） */
-  const coOf = (id) => (client.configOptions || []).find((o) => o && o.id === id) || null;
-  const modeCo = coOf("mode"),
-    modelCo = coOf("model"),
-    thinkCo = coOf("thinking");
-  const modeValue = (client.modes && client.modes.currentModeId) || (modeCo && modeCo.currentValue) || "";
-  const modeOptions =
-    client.modes && client.modes.availableModes && client.modes.availableModes.length
-      ? client.modes.availableModes.map((m) => ({ value: m.id, name: m.name || m.id }))
-      : (modeCo && modeCo.options) || [];
-  const sel = (title, value, options, onChange) =>
-    options && options.length
-      ? e(
-          "select",
-          { className: "pw-acp-sel", title, value, onChange: (ev) => onChange(ev.target.value) },
-          options.map((o) => e("option", { key: o.value, value: o.value }, o.name || o.value)),
-        )
-      : null;
-  /* 上下文用量条（usage_update） */
-  const pct = client.usage && client.usage.size ? Math.min(100, Math.round((client.usage.used / client.usage.size) * 100)) : 0;
-  const kfmt = (n) => (n >= 1000 ? (n / 1024).toFixed(n >= 10240 ? 0 : 1) + "k" : String(n));
-  /* 历史会话：kimi 的 session/list 不按 cwd 过滤（实测），前端过滤 */
-  const histList = (client.sessions || [])
-    .filter((s) => s && s.sessionId && s.cwd === client.cwd)
-    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  /* 斜杠命令补全：draft 以 / 开头且不含空白时弹出；kimi 会把全部技能暴露成 /skill:*（实测 72 条），
-   * 用子串模糊匹配（不区分大小写），弹窗可滚动、键盘全量导航 */
-  const slashQ = draft.slice(1).toLowerCase();
-  const slashAll =
-    !slashOff && draft.charAt(0) === "/" && !/\s/.test(draft)
-      ? client.commands.filter((c) => c && c.name && (slashQ === "" || c.name.toLowerCase().indexOf(slashQ) >= 0))
-      : [];
-  const sIdx = Math.min(slashIdx, Math.max(0, slashAll.length - 1));
-  /* 发送语义按状态分派（参考 Cursor 排队/引导交互，用户决策 2026-08）：
-   * 空闲=直接发；运行中 Enter/后续消息=入队（轮次结束自动补发）；引导=cancel 后回发；
-   * 断线=入队并立即触发重连，连回（hello/loaded）后自动补发 */
-  const send = () => {
-    const text = draft.trim();
-    if (!text && !images.length) return;
-    if (client.status === "dead") {
-      client.enqueue(text, images);
-      client.reconnect();
-    } else if (client.status === "running" || client.status === "waiting") client.enqueue(text, images);
-    else client.sendPrompt(text, images);
-    setDraft("");
-    setImages([]);
-    setSlashIdx(0);
-  };
-  const steer = () => {
-    const text = draft.trim();
-    if (!text && !images.length) return;
-    client.steerNow(text, images);
-    setDraft("");
-    setImages([]);
-    setSlashIdx(0);
-  };
-  const pickSlash = (c) => {
-    setDraft("/" + c.name + " ");
-    setSlashIdx(0);
-  };
-  /* 读图入队（文件选择 / 剪贴板粘贴共用）：超 4 张静默丢弃，host 侧另有 8MB/张守卫 */
-  const addImageFile = (f) => {
-    if (!f || !/^image\//.test(f.type)) return;
-    const rd = new FileReader();
-    rd.onload = () => {
-      const url = String(rd.result || "");
-      const comma = url.indexOf(",");
-      if (comma < 0) return;
-      setImages((cur) => (cur.length >= 4 ? cur : cur.concat([{ url, data: url.slice(comma + 1), mimeType: f.type }]).slice(0, 4)));
-    };
-    rd.readAsDataURL(f);
-  };
-  const onFiles = (ev) => {
-    Array.prototype.slice.call(ev.target.files || []).forEach(addImageFile);
-    ev.target.value = "";
-  };
-  /* Cmd/Ctrl+V 直接粘贴截图/图片文件；纯文本剪贴板不拦截，走默认粘贴 */
-  const onPaste = (ev) => {
-    const cd = ev.clipboardData;
-    if (!cd) return;
-    const items = Array.prototype.slice.call(cd.items || []).filter((it) => it.kind === "file" && /^image\//.test(it.type));
-    if (!items.length) return;
-    ev.preventDefault();
-    items.forEach((it) => addImageFile(it.getAsFile()));
-  };
-  const imageCap = !!(client.capabilities && client.capabilities.promptCapabilities && client.capabilities.promptCapabilities.image);
-  /* 消息悬停操作条：只有复制（用户与 AI 消息同款）。已复制反馈按 item.key 记 */
-  const copyText = (t) => {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
-    const ta = document.createElement("textarea");
-    ta.value = t;
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand("copy"); } catch (_) { /* 忽略 */ }
-    ta.remove();
-    return Promise.resolve();
-  };
-  const copyMsg = (it) => {
-    copyText(it.text || "");
-    setCopiedKey(it.key);
-    setTimeout(() => setCopiedKey((k) => (k === it.key ? null : k)), 1200);
-  };
-  const msgActs = (it) =>
-    e(
-      "div",
-      { className: "pw-acp-acts" },
-      e(
-        "button",
-        { className: "pw-acp-act" + (copiedKey === it.key ? " ok" : ""), title: "复制内容", onClick: () => copyMsg(it) },
-        copiedKey === it.key ? CheckIcon(11) : CopyIcon(11),
-        copiedKey === it.key ? "已复制" : "复制",
-      ),
-    );
-  /* 顶部控制条已按用户决策移除（2026-08）：头条干扰阅读输出，名字/状态与 tab 重复。
-   * 布局：会话操作（＋新增/历史/分叉）在输入区图片钮左方；模式（左）与模型/思考/上下文（右）
-   * 在输入区下沿控制行；上下文为紧凑指示器，点击展开明细浮层（主对话同款交互）。 */
-  return e(
-    "div",
-    { className: "pw-acp" },
-    client.status === "dead"
-      ? e(
-          "div",
-          { className: "pw-acp-dead" },
-          e(
-            "span",
-            { className: "pw-acp-dead-text" },
-            client.reconnecting ? "连接已断开，正在自动重连（第 " + client.reconnecting + " 次）…" : client.fatal || "agent 进程已退出 / 连接已断开",
-          ),
-          e("button", { className: "pw-btn-plain", onClick: () => client.reconnect() }, "立即重连"),
-        )
-      : null,
-    e(
-      "div",
-      { className: "pw-acp-stream", ref: scrollRef },
-      client.items.map((it) =>
-        it.kind === "tool"
-          ? e(
-              "div",
-              { key: it.key, className: "pw-acp-tool st-" + it.status, title: it.arg || it.title },
-              e("span", { className: "pw-acp-tool-status" }, TOOL_STATUS[it.status] || it.status),
-              e("span", { className: "pw-acp-tool-title" }, it.title),
-              /* kimi 的 Bash 类标题是 "Running: <命令>"，与提取的 arg 重复——标题已含 arg 就不再重复显示 */
-              it.arg && it.title.indexOf(it.arg) < 0 ? e("span", { className: "pw-acp-tool-arg" }, shortArg(it.arg)) : null,
-              it.output
-                ? e(
-                    "details",
-                    { className: "pw-acp-tool-out" },
-                    e("summary", null, "输出"),
-                    e("pre", null, it.output.length > 2000 ? it.output.slice(0, 2000) + "\n…（截断）" : it.output),
-                  )
-                : null,
-            )
-          : it.kind === "plan"
-            ? e("pre", { key: it.key, className: "pw-acp-plan" }, it.text)
-            : it.kind === "note"
-              ? e("div", { key: it.key, className: "pw-acp-note" }, it.text)
-              : it.kind === "error"
-                ? e("div", { key: it.key, className: "pw-acp-error" }, it.text)
-                : it.kind === "agent"
-                  ? /* agent 正文按 markdown 渲染（复用预览栏渲染器；user 回声/think 保持纯文本）。
-                     * 流式中途的未闭合围栏/半行语法由渲染器自然降级为原文，下一 chunk 到来即自愈 */
-                  e(
-                    "div",
-                    { key: it.key, className: "pw-acp-msgw agent" },
-                    e("div", { className: "pw-acp-msg agent pw-acp-md" }, renderMarkdown(stripCompactNotice(it.text), null, client.cwd)),
-                    msgActs(it),
-                  )
-                  : it.kind === "user"
-                    ? e(
-                        "div",
-                        { key: it.key, className: "pw-acp-msgw user" },
-                        e(
-                          "div",
-                          { className: "pw-acp-msg user" },
-                          it.images && it.images.length
-                            ? e(
-                                "span",
-                                { className: "pw-acp-imgs" },
-                                it.images.map((im, i) => e("img", { key: i, className: "pw-acp-thumb", src: im.url })),
-                              )
-                            : null,
-                          it.text,
-                        ),
-                        msgActs(it),
-                      )
-                    : /* thought 等其余条目保持裸气泡（无操作条） */
-                      e("div", { key: it.key, className: "pw-acp-msg " + it.kind }, it.text),
-      ),
-      client.perm
-        ? e(
-            "div",
-            { className: "pw-acp-perm" },
-            e("div", { className: "pw-acp-perm-title" }, client.perm.title),
-            e(
-              "div",
-              { className: "pw-acp-perm-opts" },
-              (client.perm.options || []).map((o) =>
-                e(
-                  "button",
-                  {
-                    key: o.optionId || o.id || o.name,
-                    className: "pw-btn-plain",
-                    onClick: () => client.answerPermission(client.perm.requestId, o.optionId || o.id || o.name),
-                  },
-                  o.name || o.optionId || o.id,
-                ),
-              ),
-            ),
-          )
-        : null,
-    ),
-    images.length
-      ? e(
-          "div",
-          { className: "pw-acp-chips" },
-          images.map((im, i) =>
-            e(
-              "span",
-              { key: i, className: "pw-acp-chip" },
-              e("img", { src: im.url }),
-              e(
-                "span",
-                { className: "pw-acp-chip-x", title: "移除", onClick: () => setImages((cur) => cur.filter((_, j) => j !== i)) },
-                "×",
-              ),
-            ),
-          ),
-        )
-      : null,
-    histOpen
-      ? e(
-          "div",
-          { className: "pw-acp-hist" },
-          client.historyBusy
-            ? e("div", { className: "pw-hint" }, "加载中…")
-            : histList.length
-              ? histList.map((s) =>
-                  e(
-                    "button",
-                    {
-                      key: s.sessionId,
-                      className: "pw-acp-hist-row" + (s.sessionId === client.sessionId ? " cur" : ""),
-                      title: s.sessionId,
-                      onClick: () => {
-                        setHistOpen(false);
-                        client.loadSession(s.sessionId);
-                      },
-                    },
-                    e("span", { className: "pw-acp-hist-title" }, s.title || "(无标题)"),
-                    e("span", { className: "pw-acp-hist-time" }, relTime(Date.parse(s.updatedAt || "") || 0)),
-                    /* 删除：两击确认；当前会话不显示（成功帧 session_deleted 会把行移除） */
-                    s.sessionId !== client.sessionId
-                      ? e(
-                          "span",
-                          {
-                            className: "pw-acp-hist-del" + (delId === s.sessionId ? " confirm" : ""),
-                            title: delId === s.sessionId ? "再次点击确认删除" : "删除该会话",
-                            onClick: (ev) => {
-                              ev.stopPropagation();
-                              if (delId === s.sessionId) {
-                                setDelId(null);
-                                client.deleteSession(s.sessionId);
-                              } else {
-                                setDelId(s.sessionId);
-                              }
-                            },
-                          },
-                          delId === s.sessionId ? "删?" : "×",
-                        )
-                      : null,
-                  ),
-                )
-              : e("div", { className: "pw-hint" }, "该目录下没有历史会话"),
-        )
-      : null,
-    /* 已排队面板（参考截图交互）：左侧计数，右侧"移回输入框"（取回最近一条到草稿） */
-    client.queue.length
-      ? e(
-          "div",
-          { className: "pw-acp-queue" },
-          e(
-            "div",
-            { className: "pw-acp-queue-head" },
-            e("span", { className: "pw-acp-queue-n" }, "已排队 · " + client.queue.length),
-            e(
-              "button",
-              {
-                className: "pw-acp-hbtn",
-                title: "把最近一条排队消息移回输入框",
-                onClick: () => {
-                  const m = client.popQueue();
-                  if (m) {
-                    setDraft(m.text);
-                    setImages(m.images || []);
-                  }
-                },
-              },
-              "移回输入框",
-            ),
-          ),
-          client.queue.map((m, i) =>
-            e("div", { key: i, className: "pw-acp-queue-item", title: m.text }, (m.images && m.images.length ? "[图×" + m.images.length + "] " : "") + (m.text || "(空)")),
-          ),
-        )
-      : null,
-    e(
-      "div",
-      { className: "pw-acp-composer" },
-      slashAll.length
-        ? e(
-            "div",
-            { className: "pw-acp-slash" },
-            slashAll.map((c, i) =>
-              e(
-                "button",
-                {
-                  key: c.name,
-                  className: "pw-acp-slash-row" + (i === sIdx ? " cur" : ""),
-                  /* 键盘导航时让选中行滚进可视区 */
-                  ref: i === sIdx ? (el) => el && el.scrollIntoView({ block: "nearest" }) : null,
-                  onMouseDown: (ev) => {
-                    ev.preventDefault();
-                    pickSlash(c);
-                  },
-                },
-                e("span", { className: "pw-acp-slash-name" }, "/" + c.name),
-                e("span", { className: "pw-acp-slash-desc", title: c.description || "" }, String(c.description || "").split("\n")[0]),
-              ),
-            ),
-          )
-        : !slashOff && draft.charAt(0) === "/" && !/\s/.test(draft)
-          ? e(
-              "div",
-              { className: "pw-acp-slash" },
-              e("div", { className: "pw-acp-slash-empty" }, client.commands.length ? "无匹配命令" : "命令加载中…"),
-            )
-          : null,
-      /* 输入框独立成框（用户决策）：运行中也可输入——占位提示 引导/排队 双出口 */
-      e("input", { ref: fileRef, type: "file", accept: "image/*", multiple: true, style: { display: "none" }, onChange: onFiles }),
-      e("input", {
-        value: draft,
-        placeholder:
-          client.status === "running" || client.status === "waiting"
-            ? "立即引导 / 排队后续消息…"
-            : client.status === "dead"
-              ? "连接已断开——输入后回车将自动重连并发送"
-              : imageCap
-                ? "向 Kimi Code 发送指令…（/ 命令，可粘贴图片）"
-                : "向 Kimi Code 发送指令…（/ 命令）",
-        onChange: (ev) => {
-          setDraft(ev.target.value);
-          setSlashIdx(0);
-          setSlashOff(false);
-        },
-        onPaste: imageCap ? onPaste : undefined,
-        onKeyDown: (ev) => {
-          if (ev.isComposing) return;
-          if (slashAll.length && (ev.key === "ArrowDown" || ev.key === "ArrowUp")) {
-            ev.preventDefault();
-            setSlashIdx((i) => (i + (ev.key === "ArrowDown" ? 1 : -1) + slashAll.length) % slashAll.length);
-          } else if (slashAll.length && (ev.key === "Tab" || ev.key === "Enter")) {
-            ev.preventDefault();
-            pickSlash(slashAll[sIdx]);
-          } else if (ev.key === "Escape") {
-            setSlashOff(true);
-          } else if (ev.key === "Enter") {
-            send();
-          }
-        },
-        }),
-      client.status === "running" || client.status === "waiting"
-        ? [
-            e(
-              "button",
-              { key: "steer", className: "pw-acp-mini", title: "引导：打断当前任务，立即处理这条消息", disabled: !draft.trim() && !images.length, onClick: steer },
-              "引导",
-            ),
-            e(
-              "button",
-              { key: "queue", className: "pw-acp-mini", title: "后续消息：加入队列，当前任务结束后自动发送", disabled: !draft.trim() && !images.length, onClick: send },
-              "后续消息",
-            ),
-          ]
-        : e("button", { className: "pw-btn-primary", disabled: !draft.trim() && !images.length, onClick: send }, "发送"),
-    ),
-    /* 控制行（框外下方）：会话操作（新对话/历史/分叉/图片）+ 模式（左）；模型/思考/上下文/停止（右）。
-     * 浮层数据只有 usage_update 的 {used,size}——ACP 不提供系统提示词/工具分项，明细从简 */
-    e(
-      "div",
-      { className: "pw-acp-controls" },
-      e(
-        "button",
-        { className: "pw-acp-hbtn", title: "新对话（同目录开一个空白 Kimi 会话）", disabled: client.busy(), onClick: () => client.newSession() },
-        "新对话",
-      ),
-        e(
-          "button",
-          {
-            className: "pw-acp-hbtn pw-acp-hist-btn" + (histOpen ? " on" : ""),
-            title: "历史会话（该目录下的 Kimi 会话，可恢复）",
-            onClick: () => {
-              const v = !histOpen;
-              setHistOpen(v);
-              /* 替换式弹出：开历史收 usage（外点监听护住开关按钮，
-               * 互斥只能放在按钮自己的 click 里） */
-              if (v) { client.listSessions(); setUsageOpen(false); }
-            },
-          },
-          "历史",
-        ),
-        e(
-          "button",
-          {
-            className: "pw-acp-hbtn pw-acp-ibtn",
-            title: "分叉当前会话（复制出带完整上下文的副本，原会话保留）",
-            disabled: client.busy(),
-            onClick: () => client.forkSession(),
-          },
-          GitBranchIcon(11),
-        ),
-        imageCap
-          ? e(
-              "button",
-              { className: "pw-acp-attach", title: "附加图片（最多 4 张）", onClick: () => fileRef.current && fileRef.current.click() },
-              ImageIcon(14),
-            )
-          : null,
-        sel("模式（default/plan/auto/yolo）", modeValue, modeOptions, (v) => client.setMode(v)),
-        e("span", { className: "pw-bpanel-flex" }),
-        modelCo ? sel("模型", modelCo.currentValue, modelCo.options, (v) => client.setConfig("model", v)) : null,
-        thinkCo ? sel("Thinking 档位", thinkCo.currentValue, thinkCo.options, (v) => client.setConfig("thinking", v)) : null,
-        /* 压缩上下文：发送 kimi 内建 /compact（已实测暴露在 available_commands）。
-         * 参照 pi-web ChatInput：压缩中图标换实心停止块、点击=中止（onCompact/onAbort 切换） */
-        e(
-          "button",
-          {
-            className: "pw-acp-hbtn pw-acp-ibtn pw-acp-compact" + (client.compacting ? " ing" : ""),
-            title: client.compacting ? "中止压缩" : "压缩上下文（发送 /compact：总结历史、释放上下文窗口，原会话内容随之精简）",
-            disabled: client.busy() && !client.compacting,
-            onClick: () => (client.compacting ? client.cancel() : client.sendPrompt("/compact")),
-          },
-          client.compacting ? StopIcon(11) : MinimizeIcon(11),
-          client.compacting ? "压缩中…" : "压缩",
-        ),
-        client.usage && client.usage.size
-        ? e(
-            "button",
-            {
-              className: "pw-acp-usage" + (pct >= 80 ? " hot" : "") + (usageOpen ? " on" : ""),
-              title: "上下文占用，点击展开明细",
-              onClick: () => {
-                /* 替换式弹出：开 usage 收历史（外点监听护住开关按钮，
-                 * 互斥只能放在按钮自己的 click 里） */
-                const v = !usageOpen;
-                setUsageOpen(v);
-                if (v) setHistOpen(false);
-              },
-            },
-            /* 圆环占用指示（对齐 Kimi 原生应用）：pathLength 归一到 100，
-             * dasharray 第一段即百分比；≥80% 走 error 色（沿用原 hot 语义） */
-            e(
-              "svg",
-              { className: "pw-acp-usage-ring", viewBox: "0 0 20 20", "aria-hidden": "true" },
-              e("circle", { className: "pw-acp-usage-ring-track", cx: 10, cy: 10, r: 8 }),
-              e("circle", {
-                className: "pw-acp-usage-ring-arc" + (pct >= 80 ? " hot" : ""),
-                cx: 10, cy: 10, r: 8,
-                pathLength: 100,
-                strokeDasharray: pct + " " + (100 - pct),
-                transform: "rotate(-90 10 10)",
-              }),
-            ),
-            e("span", { className: "pw-acp-usage-text" }, pct + "%"),
-          )
-        : null,
-      /* 红色停止（用户决策：不叫取消；运行/等待中出现，位于控制行右端） */
-      client.status === "running" || client.status === "waiting"
-        ? e("button", { className: "pw-acp-stop", title: "停止当前任务", onClick: () => client.cancel() }, "■ 停止")
-        : null,
-      usageOpen && client.usage && client.usage.size
-        ? e(
-            "div",
-            { className: "pw-acp-pop" },
-            e("div", { className: "pw-acp-pop-title" }, "上下文已用 " + pct + "%"),
-            e(
-              "div",
-              { className: "pw-acp-pop-bar" },
-              e("div", { className: "pw-acp-usage-fill" + (pct >= 80 ? " hot" : ""), style: { width: pct + "%" } }),
-            ),
-            e("div", { className: "pw-acp-pop-num" }, kfmt(client.usage.used) + " / " + kfmt(client.usage.size) + " tokens"),
-          )
-        : null,
-      ),
+function SparkleIcon(t) {
+  return ic(
+    [
+      ["p", "M12 2l2.4 5.6L20 10l-5.6 2.4L12 18l-2.4-5.6L4 10l5.6-2.4L12 2z"],
+    ],
+    t || 12,
   );
 }
 
-/* ==================== 下侧边栏（助手面板）：终端 + 智能体 tabs ====================
- * 吸底面板，只占会话列（跟踪 .pI_x6G_centerCol 的矩形定位，打开时给会话列底部
- * padding 形成挤压，滑入滑出对齐侧栏节奏）。tab 栏：Kimi 智能体 tabs 居左（＋号选目录接入，
- * tab 上显示 agent 实时状态点，× 关闭并回收进程），「终端」与关闭钮居右。高度顶边拖拽并 localStorage 记忆。
- * 智能体连接/状态在 15-acp.js 的 AcpClient（纯 JS，面板关闭也不断连）。
- * bottomPanel / bottomArea store 在 01-stores.js（避免跨文件 TDZ）。
- * 兼容机制：bottomArea.owner 被第三方占位（dshBottomPanels.acquire）期间让位——
- * 渲染 null 且撤掉挤压 padding；释放后自动归位（open/tab/height/终端与 agent 连接全保留）。 */
+/* 同步到项目：纯左向分支箭头（绝对镜像对称） */
+function ForkProjectIcon(t) {
+  return ic(
+    [
+      ["p", "M16 19v-6a4 4 0 0 0-4-4H5"],
+      ["pl", "9 5 5 9 9 13"],
+    ],
+    t || 15,
+  );
+}
 
-/* xterm 配色：表面色走平台 token，16 色 ANSI 用 one-dark/one-light 调色板（同参考实现） */
-const ANSI_DARK = {
-  black: "#282c34", red: "#e06c75", green: "#98c379", yellow: "#e5c07f",
-  blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2", white: "#abb2bf",
-  brightBlack: "#5c6370", brightRed: "#e06c75", brightGreen: "#98c379",
-  brightYellow: "#e5c07f", brightBlue: "#61afef", brightMagenta: "#c678dd",
-  brightCyan: "#56b6c2", brightWhite: "#ffffff",
-};
-const ANSI_LIGHT = {
-  black: "#383a42", red: "#e45649", green: "#50a14f", yellow: "#c18401",
-  blue: "#0184bc", magenta: "#a626a4", cyan: "#0997b3", white: "#a0a1a7",
-  brightBlack: "#4f525e", brightRed: "#e45649", brightGreen: "#50a14f",
-  brightYellow: "#c18401", brightBlue: "#0184bc", brightMagenta: "#a626a4",
-  brightCyan: "#0997b3", brightWhite: "#fafafa",
-};
-function termTheme() {
-  const cs = getComputedStyle(document.body);
-  const dark = document.body.hasAttribute("data-ds-dark-theme");
-  const background = cs.getPropertyValue("--dsw-alias-bg-base").trim() || (dark ? "#111114" : "#ffffff");
-  const foreground = cs.getPropertyValue("--dsw-alias-label-primary").trim() || (dark ? "#e6e6e6" : "#1a1a1a");
-  return {
-    background,
-    foreground,
-    cursor: foreground,
-    cursorAccent: background,
-    selectionBackground: dark ? "rgba(255,255,255,.22)" : "rgba(0,0,0,.12)",
-    ...(dark ? ANSI_DARK : ANSI_LIGHT),
+/* 同步到知识库：纯右向分支箭头（绝对镜像对称） */
+function ForkKbIcon(t) {
+  return ic(
+    [
+      ["p", "M8 19v-6a4 4 0 0 1 4-4h7"],
+      ["pl", "15 5 19 9 15 13"],
+    ],
+    t || 15,
+  );
+}
+
+/* 抽屉最大化/还原：复用原 "»" 双叉角风格，仅改变上下方向组合（unfold more/less）。
+ * 一上一下（上∧ + 下∨）= 向上扩大；一下一上（上∨ + 下∧）= 收缩。尺寸 13 与原一致。 */
+function ExpandIcon(t) {
+  return ic(
+    [
+      ["pl", "17 11 12 6 7 11"],
+      ["pl", "7 13 12 18 17 13"],
+    ],
+    t || 13,
+  );
+}
+function CollapseIcon(t) {
+  return ic(
+    [
+      ["pl", "7 6 12 11 17 6"],
+      ["pl", "7 18 12 13 17 18"],
+    ],
+    t || 13,
+  );
+}
+
+/* 目录栏展开/收起缩放图标（Apple 风格，居中紧凑） */
+function SidebarToggleIcon(t) {
+  return ic(
+    [
+      ["r", 3, 4, 18, 16, 2],
+      ["l", 9, 4, 9, 20],
+    ],
+    t || 13,
+  );
+}
+
+/* 新增目录图标 */
+function FolderPlusIcon(t) {
+  return ic(
+    [
+      ["p", "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"],
+      ["l", 12, 11, 12, 17],
+      ["l", 9, 14, 15, 14],
+    ],
+    t || 13,
+  );
+}
+
+/* 跨目录查看全部便签图标 */
+function AllNotesIcon(t) {
+  return ic(
+    [
+      ["r", 3, 4, 18, 16, 2],
+      ["l", 7, 8, 17, 8],
+      ["l", 7, 12, 17, 12],
+      ["l", 7, 16, 13, 16],
+    ],
+    t || 13,
+  );
+}
+
+/* 纯目录图标 */
+function FolderSimpleIcon(t) {
+  return ic(
+    [
+      ["p", "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"],
+    ],
+    t || 13,
+  );
+}
+
+function qnExtractFirstImage(text) {
+  if (!text) return null;
+  const m = String(text).match(/!\[[^\]]*\]\(([^)]+)\)/);
+  return m ? m[1] : null;
+}
+
+/* 零宽字符统一剔除：空便签占位符 U+200B（E2 80 8B）及零宽连字/BOM */
+const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\uFEFF]/g;
+
+/* 便签内容规范化：空/纯空白 → 零宽占位符（host 拒绝空内容） */
+function qnContentOrBlank(content) {
+  return typeof content === "string" && content.trim() ? content : "\u200B";
+}
+
+function qnStripMarkdown(text) {
+  return String(text || "")
+    .replace(ZERO_WIDTH_RE, "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[图片]")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[#*`_~>-]/g, "")
+    .trim();
+}
+
+function qnDeriveTitle(content, fallbackTitle) {
+  if (!content) return fallbackTitle || "新便签";
+  const clean = String(content).replace(ZERO_WIDTH_RE, "").trim();
+  if (!clean) return fallbackTitle || "新便签";
+  const lines = clean.replace(/!\[[^\]]*\]\([^)]*\)/g, "").split("\n");
+  const first = lines.map((s) => s.replace(/^[#*\-`_~>\s]+/, "").trim()).find((s) => s.length > 0);
+  return first ? first.slice(0, 30) : (fallbackTitle || "新便签");
+}
+
+function qnFormatAppleDate(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  if (d.toDateString() === now.toDateString()) {
+    return pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return (d.getMonth() + 1) + "月" + d.getDate() + "日";
+  }
+  return d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate();
+}
+
+function qnSplitWords(text) {
+  const fallback = text.match(/\S+/g) || [];
+  if (typeof Intl === "undefined" || typeof Intl.Segmenter === "undefined") {
+    return text.match(/[\p{Script=Han}]+|\S+/gu) || fallback;
+  }
+  try {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+    const words = [];
+    for (const segment of segmenter.segment(text)) {
+      if (segment.isWordLike && segment.segment.trim() !== "") {
+        words.push(segment.segment);
+      }
+    }
+    return words.length > 0 ? words : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function qnSummarize(text, excerptWords, thresholdChars) {
+  const clean = qnStripMarkdown(text);
+  if (!clean) return "";
+  const maxChars = thresholdChars || 80;
+  if (clean.length <= maxChars) return clean;
+  const hasHan = /[\p{Script=Han}]/u.test(clean);
+  const keepWords = excerptWords || 3;
+  const keep = hasHan ? keepWords * 2 : keepWords;
+  const words = qnSplitWords(clean);
+  if (words.length <= keep * 2) return clean;
+  const head = words.slice(0, keep);
+  const tail = words.slice(-keep);
+  const joiner = hasHan ? "" : " ";
+  return head.join(joiner) + " … " + tail.join(joiner);
+}
+
+/* ============================ Typora Markdown <-> HTML 序列化 ============================ */
+function qnEscapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function qnInlineMd(text) {
+  return qnEscapeHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_\n]+)_/g, "<em>$1</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:6px;margin:8px 0;display:block;" />')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+}
+
+function qnMdToHtml(md) {
+  if (!md || !md.replace(ZERO_WIDTH_RE, "").trim()) return "<p><br></p>";
+  const lines = md.split("\n");
+  let html = "";
+  let inCode = false;
+  let codeBuf = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("```")) {
+      if (inCode) {
+        html += "<pre><code>" + qnEscapeHtml(codeBuf.join("\n")) + "</code></pre>";
+        codeBuf = [];
+        inCode = false;
+      } else {
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeBuf.push(line);
+      continue;
+    }
+
+    if (/^#{6}\s+/.test(line)) {
+      html += "<h6>" + qnInlineMd(line.replace(/^#{6}\s+/, "")) + "</h6>";
+    } else if (/^#{5}\s+/.test(line)) {
+      html += "<h5>" + qnInlineMd(line.replace(/^#{5}\s+/, "")) + "</h5>";
+    } else if (/^#{4}\s+/.test(line)) {
+      html += "<h4>" + qnInlineMd(line.replace(/^#{4}\s+/, "")) + "</h4>";
+    } else if (/^#{3}\s+/.test(line)) {
+      html += "<h3>" + qnInlineMd(line.replace(/^#{3}\s+/, "")) + "</h3>";
+    } else if (/^#{2}\s+/.test(line)) {
+      html += "<h2>" + qnInlineMd(line.replace(/^#{2}\s+/, "")) + "</h2>";
+    } else if (/^#{1}\s+/.test(line)) {
+      html += "<h1>" + qnInlineMd(line.replace(/^#{1}\s+/, "")) + "</h1>";
+    } else if (/^>\s*/.test(line)) {
+      html += "<blockquote>" + qnInlineMd(line.replace(/^>\s*/, "")) + "</blockquote>";
+    } else if (/^(\*\*\*|---|___)\s*$/.test(line.trim())) {
+      html += "<hr />";
+    } else if (/^[-*]\s+\[([ xX])\]\s+(.*)/.test(line)) {
+      const m = line.match(/^[-*]\s+\[([ xX])\]\s+(.*)/);
+      const isChecked = m[1].toLowerCase() === "x";
+      html += `<ul class="pw-qn-task-list"><li class="pw-qn-task${isChecked ? " checked" : ""}"><input type="checkbox"${isChecked ? " checked" : ""} /><span>` + qnInlineMd(m[2]) + "</span></li></ul>";
+    } else if (/^\d+\.\s+/.test(line)) {
+      html += "<ol><li>" + qnInlineMd(line.replace(/^\d+\.\s+/, "")) + "</li></ol>";
+    } else if (/^[-*]\s+/.test(line)) {
+      html += "<ul><li>" + qnInlineMd(line.replace(/^[-*]\s+/, "")) + "</li></ul>";
+    } else if (/^!\[([^\]]*)\]\(([^)]+)\)/.test(line)) {
+      const m = line.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
+      html += '<p><img src="' + m[2] + '" alt="' + (m[1] || "") + '" style="max-width:100%;border-radius:6px;margin:8px 0;display:block;" /></p>';
+    } else if (line.trim() === "") {
+      html += "<p><br></p>";
+    } else {
+      html += "<p>" + qnInlineMd(line) + "</p>";
+    }
+  }
+  if (inCode) {
+    html += "<pre><code>" + qnEscapeHtml(codeBuf.join("\n")) + "</code></pre>";
+  }
+  return html;
+}
+
+function qnHtmlToMd(node) {
+  if (!node) return "";
+  let md = "";
+  for (let i = 0; i < node.childNodes.length; i++) {
+    const child = node.childNodes[i];
+    if (child.nodeType === 3) {
+      md += child.textContent;
+    } else if (child.nodeType === 1) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "h1") {
+        md += "# " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "h2") {
+        md += "## " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "h3") {
+        md += "### " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "h4") {
+        md += "#### " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "h5") {
+        md += "##### " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "h6") {
+        md += "###### " + qnHtmlToMd(child).trim() + "\n\n";
+      } else if (tag === "blockquote") {
+        const text = qnHtmlToMd(child).trim();
+        if (text) md += "> " + text + "\n\n";
+      } else if (tag === "hr") {
+        md += "---\n\n";
+      } else if (tag === "p" || tag === "div") {
+        const text = qnHtmlToMd(child).trim();
+        if (text) md += text + "\n\n";
+        else md += "\n";
+      } else if (tag === "li") {
+        const chk = child.querySelector && child.querySelector('input[type="checkbox"]');
+        if (chk) {
+          const isChecked = chk.checked;
+          const clone = child.cloneNode(true);
+          const cInput = clone.querySelector('input[type="checkbox"]');
+          if (cInput) cInput.remove();
+          const t = qnHtmlToMd(clone).trim();
+          md += (isChecked ? "- [x] " : "- [ ] ") + t + "\n";
+        } else if (child.parentElement && child.parentElement.tagName.toLowerCase() === "ol") {
+          md += "1. " + qnHtmlToMd(child).trim() + "\n";
+        } else {
+          md += "- " + qnHtmlToMd(child).trim() + "\n";
+        }
+      } else if (tag === "ul" || tag === "ol") {
+        md += qnHtmlToMd(child) + "\n";
+      } else if (tag === "a") {
+        const href = child.getAttribute("href") || "";
+        const text = qnHtmlToMd(child).trim();
+        md += "[" + (text || href) + "](" + href + ")";
+      } else if (tag === "img") {
+        const src = child.getAttribute("src") || "";
+        const alt = child.getAttribute("alt") || "图片";
+        md += "![" + alt + "](" + src + ")\n\n";
+      } else if (tag === "strong" || tag === "b") {
+        md += "**" + qnHtmlToMd(child) + "**";
+      } else if (tag === "em" || tag === "i") {
+        md += "*" + qnHtmlToMd(child) + "*";
+      } else if (tag === "del" || tag === "s" || tag === "strike") {
+        md += "~~" + qnHtmlToMd(child) + "~~";
+      } else if (tag === "code") {
+        md += "`" + child.textContent + "`";
+      } else if (tag === "pre") {
+        md += "```\n" + child.textContent.trim() + "\n```\n\n";
+      } else if (tag === "br") {
+        md += "\n";
+      } else {
+        md += qnHtmlToMd(child);
+      }
+    }
+  }
+  return md;
+}
+
+const qnPending = new Map();
+let qnQuoteSeq = 0;
+let qnQuoteApi = null;
+let qnAppCtx = null;
+
+/* 活跃会话 id：sessionProbe 在 06-misc，本文件被 smoke 单独 eval 时可能不在，故用 typeof 守卫 */
+function qnActiveSid() {
+  return typeof sessionProbe !== "undefined" && sessionProbe ? sessionProbe.sid : null;
+}
+
+/* 把单个便签按绝对文件路径提为 @ 提及（与侧边栏文件 @ 同机制）。返回是否插入成功 */
+function qnMentionNote(sid, name) {
+  const dir = qnStore.dir ? String(qnStore.dir).replace(/[\\/]+$/, "") : "";
+  if (!dir) return false; // 无便签目录信息，无法构造绝对路径（避免误提相对文件名）
+  const ref = mentionRef(dir + "/" + name, false, { abs: true });
+  return fileMentionBridge ? fileMentionBridge.mention(sid, ref) : false;
+}
+
+function installQnQuote(ctx) {
+  qnAppCtx = ctx;
+  const it = ctx.get("inputTriggers");
+  if (it && typeof it.registerSource === "function") {
+    ctx.effect(() => {
+      return it.registerSource({
+        trigger: "@",
+        name: "geek-notes-quote",
+        order: 200,
+        showGroupTitle: false,
+        candidates: async () => [],
+        onPick: () => undefined,
+        codec: {
+          clipboardText(ref) {
+            const t = qnPending.get(ref);
+            return t ? qnSummarize(t) : ref;
+          },
+          async serialize(ref) {
+            const t = qnPending.get(ref);
+            return t !== undefined ? t : ref;
+          },
+        },
+      });
+    });
+  }
+  qnQuoteApi = {
+    insert(text) {
+      const clean = String(text || "").replace(ZERO_WIDTH_RE, "").trim();
+      if (!clean) {
+        qnToast("无内容可引用");
+        return false;
+      }
+      const sid = qnActiveSid();
+      const actx = sid && ctx.sessions ? ctx.sessions.scope(sid) : null;
+      const conv = ctx.get("conversation");
+      const resolver = conv && conv.input;
+      if (!actx || !resolver) {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(clean).catch(() => {});
+        }
+        qnToast("无活跃会话，已复制全文到剪贴板");
+        return false;
+      }
+      let input;
+      try { input = resolver.for(actx); } catch { return false; }
+      if (!input) return false;
+      const snapshot = input.state.getSnapshot();
+      const draft = String(snapshot.draft || "");
+      const draftRev = snapshot.draftRev;
+      const refId = "qn-" + (++qnQuoteSeq) + "-" + Date.now();
+      qnPending.set(refId, clean);
+      if (qnPending.size > 50) {
+        const oldest = qnPending.keys().next().value;
+        qnPending.delete(oldest);
+      }
+      const span = { start: draft.length, end: draft.length, draftRev };
+      const label = qnSummarize(clean);
+      const ok = input.insertReference(
+        {
+          source: "geek-notes-quote",
+          ref: refId,
+          label,
+          appearance: "file",
+          clipboardText: label,
+        },
+        span,
+      );
+      if (ok) {
+        qnToast("已引用到输入框");
+      } else {
+        qnToast("引用失败，请稍后重试");
+      }
+      return ok;
+    },
   };
 }
 
-/* xterm 按需加载（评审修复：vendor 284KB 原先拼进 bundle 求值期全量解析，
- * 与终端惰性策略矛盾）。vendor 从拼接链剥离，host /wb/vendor-xterm.js 直出，
- * 首开终端才注入 <script>（classic script 顶层 var 挂 window.__pwXterm，同原拼接语义）。
- * 共享单例 promise：多 tab/重挂载只加载一次；失败可重试（清掉单例） */
-let xtermLoading = null;
-function ensureXterm() {
-  if (window.__pwXterm) return Promise.resolve(true);
-  if (!xtermLoading)
-    xtermLoading = new Promise((resolve) => {
-      const s = document.createElement("script");
-      s.src = "/__dsh-geek-sidebar__/wb/vendor-xterm.js";
-      s.async = true;
-      s.onload = () => resolve(!!window.__pwXterm);
-      s.onerror = () => ((xtermLoading = null), resolve(false));
-      document.head.appendChild(s);
-    });
-  return xtermLoading;
+let qnToastTimer = null;
+function qnToast(msg) {
+  if (qnToastTimer) clearTimeout(qnToastTimer);
+  qnStore.set({ toast: msg });
+  qnToastTimer = setTimeout(() => {
+    qnStore.set({ toast: null });
+    qnToastTimer = null;
+  }, 2500);
 }
 
-/* 终端视图：xterm + WS 连接 host pty；断线自动重连（1011+reason 显示错误横幅） */
-function TerminalView() {
-  const e = React.createElement;
-  const hostRef = React.useRef(null);
-  const [fatal, setFatal] = React.useState(null);
+/* 便签目录（分类）元数据读写 */
+async function qnLoadFoldersMeta() {
+  try {
+    const res = await host.call("workbench.qnFoldersGet").catch(() => null);
+    if (res && res.ok && Array.isArray(res.folders)) {
+      qnStore.set({ folders: res.folders, noteFolders: res.noteFolders || {} });
+      return { folders: res.folders, noteFolders: res.noteFolders || {} };
+    }
+  } catch {}
+  try {
+    const raw = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem("pw-qn-folders-meta") : null;
+    if (raw) {
+      const j = JSON.parse(raw);
+      if (j && Array.isArray(j.folders)) {
+        qnStore.set({ folders: j.folders, noteFolders: j.noteFolders || {} });
+        return j;
+      }
+    }
+  } catch {}
+  return { folders: [], noteFolders: {} };
+}
+
+async function qnSaveFoldersMeta(meta) {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem("pw-qn-folders-meta", JSON.stringify(meta));
+    }
+  } catch {}
+  qnStore.set({ folders: meta.folders, noteFolders: meta.noteFolders });
+  try {
+    await host.call("workbench.qnFoldersSet", meta).catch(() => {});
+  } catch {}
+}
+
+async function qnCreateFolder(name) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    qnToast("目录名称不能为空");
+    return false;
+  }
+  const cur = qnStore.folders || [];
+  if (cur.includes(trimmed)) {
+    qnToast("已存在同名目录");
+    return false;
+  }
+  const next = [...cur, trimmed];
+  await qnSaveFoldersMeta({ folders: next, noteFolders: qnStore.noteFolders || {} });
+  qnStore.set({ selectedFolder: trimmed });
+  qnToast("已创建目录: " + trimmed);
+  return true;
+}
+
+async function qnRenameFolder(oldName, newName) {
+  const trimmed = String(newName || "").trim();
+  if (!trimmed || trimmed === oldName) return false;
+  const cur = qnStore.folders || [];
+  if (cur.includes(trimmed)) {
+    qnToast("已存在同名目录");
+    return false;
+  }
+  const nextFolders = cur.map((f) => (f === oldName ? trimmed : f));
+  const nextNoteFolders = { ...(qnStore.noteFolders || {}) };
+  for (const k of Object.keys(nextNoteFolders)) {
+    if (nextNoteFolders[k] === oldName) nextNoteFolders[k] = trimmed;
+  }
+  await qnSaveFoldersMeta({ folders: nextFolders, noteFolders: nextNoteFolders });
+  if (qnStore.selectedFolder === oldName) {
+    qnStore.set({ selectedFolder: trimmed });
+  }
+  await qnLoadNotes(qnStore.q);
+  qnToast("目录已改名");
+  return true;
+}
+
+async function qnDeleteFolder(folderName) {
+  const cur = qnStore.folders || [];
+  const nextFolders = cur.filter((f) => f !== folderName);
+  const nextNoteFolders = { ...(qnStore.noteFolders || {}) };
+  for (const k of Object.keys(nextNoteFolders)) {
+    if (nextNoteFolders[k] === folderName) delete nextNoteFolders[k];
+  }
+  await qnSaveFoldersMeta({ folders: nextFolders, noteFolders: nextNoteFolders });
+  if (qnStore.selectedFolder === folderName) {
+    qnStore.set({ selectedFolder: null });
+  }
+  await qnLoadNotes(qnStore.q);
+  qnToast("目录已删除");
+}
+
+async function qnMoveNoteToFolder(noteName, targetFolder) {
+  const nextNoteFolders = { ...(qnStore.noteFolders || {}) };
+  if (targetFolder) {
+    nextNoteFolders[noteName] = targetFolder;
+    qnToast("已移至目录: " + targetFolder);
+  } else {
+    delete nextNoteFolders[noteName];
+    qnToast("已移出目录");
+  }
+  await qnSaveFoldersMeta({ folders: qnStore.folders || [], noteFolders: nextNoteFolders });
+  await qnLoadNotes(qnStore.q);
+}
+
+async function qnLoadNotes(q) {
+  qnStore.set({ loading: true });
+  try {
+    const [res, meta] = await Promise.all([
+      host.call("workbench.qnList", { q: q || "" }),
+      qnLoadFoldersMeta(),
+    ]);
+    if (res && res.ok) {
+      const nf = (meta && meta.noteFolders) || qnStore.noteFolders || {};
+      const rawNotes = res.notes || [];
+      const notes = rawNotes.map((n) => ({
+        ...n,
+        folder: nf[n.name] || "",
+      }));
+      const selected = qnStore.selected && notes.some((n) => n.name === qnStore.selected)
+        ? qnStore.selected
+        : notes.length > 0 ? notes[0].name : null;
+      qnStore.set({ notes, selected, loading: false, dir: res.dir || qnStore.dir });
+    } else {
+      qnStore.set({ loading: false });
+    }
+  } catch {
+    qnStore.set({ loading: false });
+  }
+}
+
+async function qnCreateNote(title, content) {
+  try {
+    const text = qnContentOrBlank(content);
+    const res = await host.call("workbench.qnCreate", { title: title || "新便签", content: text });
+    if (res && res.ok) {
+      if (qnStore.selectedFolder) {
+        const nf = { ...(qnStore.noteFolders || {}) };
+        nf[res.name] = qnStore.selectedFolder;
+        await qnSaveFoldersMeta({ folders: qnStore.folders || [], noteFolders: nf });
+      }
+      qnStore.set({ selected: res.name });
+      await qnLoadNotes(qnStore.q);
+      return res;
+    }
+  } catch (e) {
+    qnToast("创建失败: " + (e.message || e));
+  }
+  return null;
+}
+
+async function qnUpdateNote(name, content, title) {
+  try {
+    const text = qnContentOrBlank(content);
+    const res = await host.call("workbench.qnUpdate", { name, content: text, title });
+    if (res && res.ok) {
+      if (res.name && res.name !== name && qnStore.noteFolders && qnStore.noteFolders[name]) {
+        const nf = { ...(qnStore.noteFolders || {}) };
+        nf[res.name] = nf[name];
+        delete nf[name];
+        await qnSaveFoldersMeta({ folders: qnStore.folders || [], noteFolders: nf });
+      }
+      if (res.name && res.name !== name) {
+        qnStore.set({ selected: res.name });
+      }
+      await qnLoadNotes(qnStore.q);
+      return res;
+    }
+  } catch (e) {
+    qnToast("更新失败: " + (e.message || e));
+  }
+  return null;
+}
+
+async function qnDeleteNote(name) {
+  try {
+    const res = await host.call("workbench.qnDelete", { name });
+    if (res && res.ok) {
+      if (qnStore.noteFolders && qnStore.noteFolders[name]) {
+        const nf = { ...(qnStore.noteFolders || {}) };
+        delete nf[name];
+        await qnSaveFoldersMeta({ folders: qnStore.folders || [], noteFolders: nf });
+      }
+      qnToast("便签已删除");
+      await qnLoadNotes(qnStore.q);
+      return res;
+    }
+  } catch (e) {
+    qnToast("删除失败: " + (e.message || e));
+  }
+  return null;
+}
+
+/* 划选浮动气泡 */
+function QnSelectionBubble() {
+  const [bubble, setBubble] = React.useState(null);
+  const bubbleRef = React.useRef(null);
+
   React.useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return undefined;
-    let dead = false,
-      dispose = null;
-    ensureXterm().then((ok) => {
-      if (dead) return;
-      const XT = window.__pwXterm;
-      if (!ok || !XT) {
-        setFatal("xterm 未加载");
+    function checkSelection() {
+      if (qnStore.capture === false) {
+        setBubble(null);
         return;
       }
-      dispose = initTerm(host, XT, setFatal);
-    });
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setBubble(null);
+        return;
+      }
+      const text = sel.toString().trim();
+      const anchorNode = sel.anchorNode;
+      const el = anchorNode && anchorNode.nodeType === 1 ? anchorNode : (anchorNode && anchorNode.parentElement);
+      if (!el) {
+        setBubble(null);
+        return;
+      }
+      if (el.closest("input, textarea")) {
+        setBubble(null);
+        return;
+      }
+      // 便签编辑区（contenteditable）内的选中内容也允许划选引用
+      const inEditor = el.closest(".pw-qn-typora-canvas");
+      if (inEditor) {
+        if (text.length < 1) {
+          setBubble(null);
+          return;
+        }
+      } else {
+        if (el.closest("[data-pw-qn]")) {
+          setBubble(null);
+          return;
+        }
+        if (text.length < 4) {
+          setBubble(null);
+          return;
+        }
+        const validContainer = el.closest("[data-conversation-scroll], .pw-details, .pw-drawer-wrap, main, [data-panel]");
+        if (!validContainer) {
+          setBubble(null);
+          return;
+        }
+      }
+      try {
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        if (!rect || (rect.width === 0 && rect.height === 0)) {
+          setBubble(null);
+          return;
+        }
+        const top = Math.max(10, rect.top - 40);
+        const left = Math.max(10, Math.min(window.innerWidth - 180, rect.left + rect.width / 2 - 80));
+        setBubble({ text, top, left, mode: inEditor ? "note" : "global" });
+      } catch {
+        setBubble(null);
+      }
+    }
+
+    function onPointerUp() {
+      setTimeout(checkSelection, 20);
+    }
+
+    function onMouseDown(e) {
+      if (bubbleRef.current && bubbleRef.current.contains(e.target)) return;
+      setBubble(null);
+    }
+
+    function onKeyDown(e) {
+      if (e.key === "Escape") setBubble(null);
+    }
+
+    document.addEventListener("pointerup", onPointerUp);
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
-      ((dead = !0), dispose && dispose());
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
-  return e(
+
+  if (!bubble) return null;
+
+  const isNote = bubble.mode === "note";
+
+  return React.createElement(
     "div",
-    { className: "pw-term-wrap" },
-    e("div", { ref: hostRef, className: "pw-term-host" }),
-    fatal ? e("div", { className: "pw-term-fatal" }, fatal) : null,
+    {
+      ref: bubbleRef,
+      "data-pw-qn": "bubble",
+      className: "pw-qn-bubble",
+      style: { top: bubble.top + "px", left: bubble.left + "px" },
+    },
+    !isNote &&
+      React.createElement(
+        "button",
+        {
+          className: "pw-qn-bubble-btn",
+          onClick: (e) => {
+            e.stopPropagation();
+            qnCreateNote("", bubble.text);
+            setBubble(null);
+          },
+        },
+        "存入便签",
+      ),
+    !isNote && React.createElement("span", { className: "pw-qn-bubble-sep" }),
+    React.createElement(
+      "button",
+      {
+        className: "pw-qn-bubble-btn accent",
+        onClick: (e) => {
+          e.stopPropagation();
+          if (qnQuoteApi) qnQuoteApi.insert(bubble.text);
+          setBubble(null);
+        },
+      },
+      "引用到对话",
+    ),
   );
 }
 
-/* 终端初始化主体（xterm 就绪后调用）：建 term + WS + 各监听，返回 cleanup */
-function initTerm(host, XT, setFatal) {
-  {
-    const term = new XT.Terminal({
-      cursorBlink: true,
-      fontSize: 12,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      scrollback: 4000,
-      allowTransparency: true,
-      theme: termTheme(),
-    });
-    const fit = new XT.FitAddon();
-    term.loadAddon(fit);
-    term.open(host);
-    const applyTheme = () => {
-      term.options.theme = termTheme();
-    };
-    const mo = new MutationObserver(applyTheme);
-    mo.observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme"] });
-    let socket = null,
-      closed = false,
-      failures = 0,
-      retryTimer = 0;
-    const wsUrl = () => {
-      const u = new URL("/__dsh-geek-sidebar__/wb/terminal-ws", location.origin);
-      u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-      const p = new URLSearchParams({ sessionId: sessionProbe.sid || "_", tab: "assistant" });
-      if (currentRootPath) p.set("cwd", currentRootPath);
-      u.search = p.toString();
-      return u.toString();
-    };
-    const sendResize = () => {
-      if (socket && socket.readyState === 1) socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-    };
-    const connect = () => {
-      if (closed) return;
-      socket = new WebSocket(wsUrl());
-      socket.onopen = () => {
-        failures = 0;
-        setFatal(null);
-        try {
-          fit.fit();
-        } catch (e2) {}
-        sendResize();
-      };
-      socket.onmessage = (ev) => {
-        if (typeof ev.data === "string") term.write(ev.data);
-      };
-      socket.onclose = (ev) => {
-        if (closed) return;
-        if (ev.code === 1011 && ev.reason) {
-          setFatal(ev.reason);
-          return;
-        }
-        failures++;
-        if (failures > 3) {
-          setFatal("终端连接失败（code " + ev.code + "）");
-          return;
-        }
-        retryTimer = setTimeout(connect, 1200);
-      };
-      socket.onerror = () => {};
-    };
-    const inputSub = term.onData((d) => {
-      if (socket && socket.readyState === 1) socket.send(d);
-    });
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-        sendResize();
-      } catch (e3) {}
-    });
-    ro.observe(host);
-    connect();
-    /* 评审修复：bus 节拍上比对连接参数键（sid|root），变化即平推重连——原版 wsUrl 的
-     * sessionId/cwd 在建连时捕获，切换会话/项目后终端仍挂旧绑定。root 经 01 的
-     * setCurrentRootPath 发节拍，sid 经 sessionProbe.set 发节拍，两处都能捕到。
-     * 平推不算失败：置空 onclose 不走退避，xterm 保留 scrollback 仅换 pty 绑定 */
-    let lastKey = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
-    const paramSub = bus.sub(() => {
-      if (closed) return;
-      const k2 = (sessionProbe.sid || "_") + "|" + (currentRootPath || "");
-      if (k2 === lastKey) return;
-      lastKey = k2;
-      failures = 0;
-      clearTimeout(retryTimer);
-      try {
-        if (socket) {
-          socket.onclose = null;
-          socket.close();
-        }
-      } catch (e9) {}
-      connect();
-    });
-    return () => {
-      closed = true;
-      clearTimeout(retryTimer);
-      try {
-        paramSub();
-      } catch (e9) {}
-      try {
-        ro.disconnect();
-      } catch (e4) {}
-      try {
-        mo.disconnect();
-      } catch (e5) {}
-      try {
-        inputSub.dispose();
-      } catch (e6) {}
-      try {
-        if (socket) socket.close();
-      } catch (e7) {}
-      try {
-        term.dispose();
-      } catch (e8) {}
-    };
-  }
-}
-
-/* 面板骨架：tab 栏（智能体 tabs + ＋号接入 → 右端 终端 tab + 关闭钮）+ 内容区。
- * 开合对齐左右侧栏：首次打开后常驻挂载，transform 滑入滑出（不触发重排、xterm 不重建），
- * 挤压走 padding-bottom 过渡；时长/缓动复用平台 token，与 AppFrame 列宽过渡同节奏。
- * 常驻挂载的代价：终端 WS 与 xterm 关栏后保活（换来 scrollback 保留与无闪回）。 */
-function BottomPanel(t) {
+/* 下边栏吸底抽屉：Typora 风格编辑即预览工作台 */
+function QuickNotesPanel() {
   const e = React.createElement;
-  const [, force] = React.useState(0);
-  React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
-  const [rect, setRect] = React.useState(null);
-  /* 首次打开才挂载（否则终端 PTY 会随页面加载白起）；双 rAF 让首帧以 off 态绘制再滑入 */
-  const [mounted, setMounted] = React.useState(false);
-  const [entered, setEntered] = React.useState(false);
+  const [colRect, setColRect] = React.useState({ left: 280, width: 800 });
+  const [activeNoteText, setActiveNoteText] = React.useState("");
+  const [genState, setGenState] = React.useState({ kind: "idle" });
+  const [renamingName, setRenamingName] = React.useState(null);
+  const [renameVal, setRenameVal] = React.useState("");
+  const [isExporting, setIsExporting] = React.useState(false);
+  const [tipInfo, setTipInfo] = React.useState(null);
+  const kbDir = notesStore.current || (notesStore.dirs && notesStore.dirs[0]) || null;
+  const canvasRef = React.useRef(null);
+  const autoSaveTimerRef = React.useRef(null);
+  const currentLoadingNoteRef = React.useRef(null);
+  const [prevHeight, setPrevHeight] = React.useState(null);
+  const maxDrawerHeight = typeof window !== "undefined" ? Math.max(400, window.innerHeight - 48) : 800;
+  const isMaximized = qnStore.height >= maxDrawerHeight - 20;
+
+  const handleToggleMaximize = () => {
+    if (isMaximized) {
+      const restored = prevHeight && prevHeight >= 200 ? prevHeight : 320;
+      qnStore.set({ height: restored });
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("pw-qn-height", String(restored));
+        }
+      } catch {}
+    } else {
+      setPrevHeight(qnStore.height);
+      qnStore.set({ height: maxDrawerHeight });
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("pw-qn-height", String(maxDrawerHeight));
+        }
+      } catch {}
+    }
+  };
+
+  /* 左栏宽度与可拖拽 resizer */
+  const [listWidth, setListWidth] = React.useState(() => {
+    try {
+      const v = typeof window !== "undefined" && window.localStorage ? Number(window.localStorage.getItem("pw-qn-list-width")) : 0;
+      if (v >= 140 && v <= 480) return v;
+    } catch {}
+    return 240;
+  });
+
+  /* 目录栏展开态与宽度（Apple Notes 风格 3 栏支持） */
+  const [showFolders, setShowFolders] = React.useState(() => {
+    try {
+      const v = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem("pw-qn-show-folders") : null;
+      if (v !== null) return v === "true";
+    } catch {}
+    return true;
+  });
+
+  const [folderWidth, setFolderWidth] = React.useState(() => {
+    try {
+      const v = typeof window !== "undefined" && window.localStorage ? Number(window.localStorage.getItem("pw-qn-folder-width")) : 0;
+      if (v >= 120 && v <= 320) return v;
+    } catch {}
+    return 150;
+  });
+
+  const [isCreatingFolder, setIsCreatingFolder] = React.useState(false);
+  const [newFolderVal, setNewFolderVal] = React.useState("");
+  const [renamingFolder, setRenamingFolder] = React.useState(null);
+  const [renameFolderVal, setRenameFolderVal] = React.useState("");
+  const [draggingNote, setDraggingNote] = React.useState(null);
+  const [dragOverFolder, setDragOverFolder] = React.useState(null);
+  /* 两击确认删除：复用 06-misc 共享状态机 useTwoClick（armed id 用便签 name），
+   * 与 03 树删除 / 08 会话归档 / 09 worktree 同源，不再手抄 useState。 */
+  const cnf = useTwoClick();
+
+  const onFolderResizerStart = (ev) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startW = folderWidth;
+    let latestW = startW;
+    const onMove = (moveEv) => {
+      const delta = moveEv.clientX - startX;
+      latestW = Math.max(120, Math.min(320, startW + delta));
+      setFolderWidth(latestW);
+    };
+    const onUp = () => {
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("pw-qn-folder-width", String(latestW));
+        }
+      } catch {}
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  };
+
+  const onResizerStart = (ev) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startW = listWidth;
+    let latestW = startW;
+    const onMove = (moveEv) => {
+      const delta = moveEv.clientX - startX;
+      latestW = Math.max(140, Math.min(480, startW + delta));
+      setListWidth(latestW);
+    };
+    const onUp = () => {
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("pw-qn-list-width", String(latestW));
+        }
+      } catch {}
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  };
+
+  /* 跟踪会话列位置 */
   React.useEffect(() => {
-    if (!bottomPanel.open || mounted) return undefined;
-    setMounted(true);
-    const t2 = requestAnimationFrame(() => requestAnimationFrame(() => setEntered(true)));
-    return () => cancelAnimationFrame(t2);
-  }, [bottomPanel.open, mounted]);
-  /* 跟踪会话列矩形：面板只覆盖其底部区域（左右侧栏不动） */
-  React.useEffect(() => {
-    const col = document.querySelector(".pI_x6G_centerCol");
-    if (!col) return undefined;
+    if (typeof document === "undefined") return undefined;
+    const findCol = () => {
+      const scroll = document.querySelector("[data-conversation-scroll]");
+      const col = scroll || document.querySelector(".pI_x6G_centerCol") || document.querySelector("main");
+      if (col) {
+        const r = col.getBoundingClientRect();
+        return { left: Math.round(r.left), width: Math.round(r.width) };
+      }
+      return { left: 0, width: window.innerWidth };
+    };
     const update = () => {
-      const r = col.getBoundingClientRect();
-      setRect({ left: Math.round(r.left), width: Math.round(r.width) });
+      const r = findCol();
+      setColRect((prev) => (prev.left !== r.left || prev.width !== r.width ? r : prev));
     };
     update();
-    const ro = new ResizeObserver(update);
-    ro.observe(col);
+    const scroll = document.querySelector("[data-conversation-scroll]");
+    const ro = typeof ResizeObserver !== "undefined" && scroll ? new ResizeObserver(update) : null;
+    if (ro && scroll) ro.observe(scroll);
     window.addEventListener("resize", update);
     return () => {
-      ro.disconnect();
+      if (ro) ro.disconnect();
       window.removeEventListener("resize", update);
     };
   }, []);
-  /* 挤压：打开时给会话列底部 padding（过渡与面板滑移同节奏），关闭/让位归零 */
-  const yielded = bottomArea.isYielded();
+
+  /* 会话列挤压 padding-bottom */
   React.useEffect(() => {
-    const col = document.querySelector(".pI_x6G_centerCol");
+    if (typeof document === "undefined") return undefined;
+    const col = document.querySelector(".pI_x6G_centerCol") || document.querySelector("[data-conversation-scroll]");
     if (!col) return undefined;
     if (!col.style.transition) col.style.transition = "padding-bottom var(--ds-transition-duration-slow) var(--ds-ease-in-out)";
-    col.style.paddingBottom = bottomPanel.open && !yielded ? bottomPanel.height + "px" : "0px";
-    /* 评审修复：卸载（插件热更）/依赖轮换时归零，别让挤压 padding 残留在平台列上 */
+    col.style.paddingBottom = qnStore.open ? qnStore.height + "px" : "0px";
     return () => {
       col.style.paddingBottom = "0px";
     };
-  }, [bottomPanel.open, bottomPanel.height, yielded]);
-  /* 评审修复：拖拽中的 document 监听登记到 ref，面板卸载（让位/热更）时兜底摘除——
-   * 原只在 mouseup 才摘，拖拽中卸载会永久泄漏一对监听器。hooks 须在上方 early return 之前 */
-  const dragOff = React.useRef(null);
-  React.useEffect(
-    () => () => {
-      dragOff.current && dragOff.current();
-    },
-    [],
-  );
-  if (!mounted || !rect || yielded) return null;
-  const startDrag = (ev) => {
+  }, [qnStore.open, qnStore.height]);
+
+  /* 打开时加载便签 */
+  React.useEffect(() => {
+    if (qnStore.open && qnStore.notes === null) {
+      qnLoadNotes();
+    }
+  }, [qnStore.open]);
+
+  /* 切换便签时，加载 Markdown 并渲染为 Typora 可视化内容 */
+  React.useEffect(() => {
+    if (qnStore.selected) {
+      currentLoadingNoteRef.current = qnStore.selected;
+      host.call("workbench.qnRead", { name: qnStore.selected }).then((res) => {
+        if (res && res.ok && currentLoadingNoteRef.current === qnStore.selected) {
+          const text = res.text || "";
+          setActiveNoteText(text);
+          if (canvasRef.current) {
+            canvasRef.current.innerHTML = qnMdToHtml(text);
+          }
+        }
+      }).catch(() => {
+        setActiveNoteText("");
+        if (canvasRef.current) canvasRef.current.innerHTML = "<p><br></p>";
+      });
+    } else {
+      setActiveNoteText("");
+      if (canvasRef.current) canvasRef.current.innerHTML = "";
+    }
+  }, [qnStore.selected]);
+
+  const pendingSaveRef = React.useRef(null);
+  const flushSave = async () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    if (pendingSaveRef.current) {
+      const { name, md, title } = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      await qnUpdateNote(name, md, title);
+    }
+  };
+
+  /* 组件卸载时安全刷盘 */
+  React.useEffect(() => {
+    return () => {
+      flushSave();
+    };
+  }, []);
+
+  /* 切换目录或便签列表变更时，自动保持选中项与当前目录视图一致 */
+  React.useEffect(() => {
+    if (!qnStore.open) return;
+    const curList = qnStore.selectedFolder === null
+      ? (qnStore.notes || [])
+      : (qnStore.notes || []).filter((n) => n.folder === qnStore.selectedFolder);
+    if (qnStore.selected && !curList.some((n) => n.name === qnStore.selected)) {
+      qnStore.set({ selected: curList.length > 0 ? curList[0].name : null });
+    }
+  }, [qnStore.selectedFolder, qnStore.notes, qnStore.open, qnStore.selected]);
+
+  if (!qnStore.open) return null;
+
+  /* 顶部高度拖拽手柄 */
+  const onDragStart = (ev) => {
     ev.preventDefault();
-    const startY = ev.clientY,
-      startH = bottomPanel.height;
-    const mv = (e2) => {
-      const h = Math.min(Math.max(140, startH + (startY - e2.clientY)), Math.round(window.innerHeight * 0.85));
-      bottomPanel.set({ height: h });
+    const startY = ev.clientY;
+    const startH = qnStore.height;
+    let latestH = startH;
+    const onMove = (moveEv) => {
+      const delta = startY - moveEv.clientY;
+      latestH = Math.max(180, Math.min(maxDrawerHeight, startH + delta));
+      qnStore.set({ height: latestH });
     };
-    const up = () => {
-      dragOff.current && dragOff.current();
+    const onUp = () => {
       try {
-        window.localStorage.setItem("pw-bpanel-h", String(bottomPanel.height));
-      } catch (e9) {}
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem("pw-qn-height", String(latestH));
+        }
+      } catch {}
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
     };
-    dragOff.current = () => {
-      (document.removeEventListener("mousemove", mv),
-        document.removeEventListener("mouseup", up),
-        (dragOff.current = null));
-    };
-    document.addEventListener("mousemove", mv);
-    document.addEventListener("mouseup", up);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
   };
-  /* ＋ 接入 Kimi Code：选目录 → 建 tab（AcpClient 立即连 WS 起进程） */
-  const addAgent = () => {
-    const svc = t.workspacesSvc;
-    if (!svc || typeof svc.pickDirectory !== "function") return;
-    svc
-      .pickDirectory()
-      .then((n) => {
-        if (n) acpTabs.add(n);
-      })
-      .catch(() => {});
+
+  const notes = qnStore.notes || [];
+  const visibleNotes = qnStore.selectedFolder === null
+    ? notes
+    : notes.filter((n) => n.folder === qnStore.selectedFolder);
+  const selectedNote = visibleNotes.find((n) => n.name === qnStore.selected) || null;
+
+  /* 编辑即预览：内容输入变更（序列化为 Markdown 并自动保存） */
+  const onEditorInput = () => {
+    if (!canvasRef.current || !selectedNote) return;
+    const newMd = qnHtmlToMd(canvasRef.current);
+    setActiveNoteText(newMd);
+    const derived = qnDeriveTitle(newMd, selectedNote.title);
+    pendingSaveRef.current = { name: selectedNote.name, md: newMd, title: derived };
+
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      flushSave();
+    }, 350);
   };
-  const tab = bottomPanel.tab;
-  const activeClient = tab !== "terminal" ? acpTabs.clients[tab] || null : null;
+
+  /* 待办清单点击切换：点击 Checkbox 实时切换勾选态并同步 Markdown */
+  const onCanvasClick = (ev) => {
+    if (ev.target && ev.target.type === "checkbox") {
+      const li = ev.target.closest("li.pw-qn-task");
+      if (li) {
+        if (ev.target.checked) li.classList.add("checked");
+        else li.classList.remove("checked");
+      }
+      onEditorInput();
+    }
+  };
+
+  /* 剪贴板图片直接粘贴：Typora 体验——直接插入可见图片，并更新序列化 Markdown */
+  const handlePaste = (ev) => {
+    const items = ev.clipboardData && ev.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type && item.type.startsWith("image/")) {
+        ev.preventDefault();
+        const file = item.getAsFile();
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (uploadEv) => {
+          const dataUrl = uploadEv.target.result;
+          const img = document.createElement("img");
+          img.src = dataUrl;
+          img.alt = "图片";
+          img.style.maxWidth = "100%";
+          img.style.borderRadius = "6px";
+          img.style.margin = "8px 0";
+          img.style.display = "block";
+          img.onclick = (e) => {
+            e.stopPropagation();
+            if (typeof imgZoomStore !== "undefined" && imgZoomStore.set) {
+              imgZoomStore.set(dataUrl);
+            }
+          };
+
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount > 0) {
+            const range = sel.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(img);
+            const p = document.createElement("p");
+            p.innerHTML = "<br>";
+            if (img.parentNode) {
+              img.parentNode.insertBefore(p, img.nextSibling);
+            }
+            range.setStartAfter(img);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          } else if (canvasRef.current) {
+            canvasRef.current.appendChild(img);
+          }
+          onEditorInput();
+          qnToast("图片已粘贴");
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  };
+
+  /* AI 智能生成标题并改名（逻辑完全对齐 dsh-geek-header） */
+  /* 使用 AI 模型根据内容提炼标题并同步重命名当前便签（保持所在目录不变） */
+  const handleGenerateTitle = async () => {
+    if (genState.kind === "busy") return;
+    const content = activeNoteText || (canvasRef.current ? qnHtmlToMd(canvasRef.current) : "");
+    if (!selectedNote || !content.trim()) {
+      qnToast("便签内容为空，无法生成标题");
+      return;
+    }
+    await flushSave();
+    const origName = selectedNote.name;
+    const origFolder = selectedNote.folder || (qnStore.noteFolders && qnStore.noteFolders[origName]);
+
+    setGenState({ kind: "busy" });
+    try {
+      const sid = qnActiveSid();
+      let route = null;
+      try {
+        const dirs = qnAppCtx ? qnAppCtx.get("modelDirectories") : null;
+        if (dirs && sid) {
+          const directory = dirs.directoryFor(sid);
+          const models = await directory.load();
+          const current = models && models.current;
+          if (current && current.provider && current.model) {
+            route = { provider: current.provider, model: current.model };
+          }
+        }
+      } catch {}
+
+      if (!route) {
+        try {
+          const sessions = qnAppCtx ? qnAppCtx.get("sessions") : null;
+          if (sessions && sessions.list) {
+            const snap = sessions.list.getSnapshot();
+            const curId = sid || snap.current;
+            const curSess = curId && snap.byId ? snap.byId[curId] : null;
+            if (curSess && curSess.projectionValues && curSess.projectionValues.modelSelection) {
+              const ms = curSess.projectionValues.modelSelection;
+              const cur = ms.next || ms.lastUsed;
+              if (cur && cur.provider && cur.model) {
+                route = { provider: cur.provider, model: cur.model };
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (!route) {
+        route = { provider: "turing", model: "turing/gemini-3.8-flash" };
+      }
+
+      const res = await host.call("workbench.qnGenTitle", {
+        name: origName,
+        content,
+        sessionId: sid,
+        ...route,
+      });
+
+      if (res && res.ok && res.title) {
+        /* 关键修复：便签改名后必须同步更新目录归属，避免便签脱离原文件夹 */
+        if (res.name && res.name !== origName && origFolder) {
+          const nf = { ...(qnStore.noteFolders || {}) };
+          nf[res.name] = origFolder;
+          delete nf[origName];
+          await qnSaveFoldersMeta({ folders: qnStore.folders || [], noteFolders: nf });
+        }
+        setGenState({ kind: "done" });
+        qnToast("AI 标题已生成: " + res.title);
+        await qnLoadNotes(qnStore.q);
+        if (res.name) qnStore.set({ selected: res.name });
+        setTimeout(() => setGenState({ kind: "idle" }), 2000);
+      } else {
+        setGenState({ kind: "error" });
+        qnToast("生成标题失败: " + ((res && res.error) || "未知原因"));
+        setTimeout(() => setGenState({ kind: "idle" }), 3000);
+      }
+    } catch (err) {
+      setGenState({ kind: "error" });
+      qnToast("生成失败: " + (err.message || err));
+      setTimeout(() => setGenState({ kind: "idle" }), 3000);
+    }
+  };
+
+  /* 新建便签（内容空白，标题为新便签） */
+  const handleCreateNew = async () => {
+    const res = await qnCreateNote("新便签");
+    if (res && res.ok) {
+      setTimeout(() => {
+        if (canvasRef.current) {
+          canvasRef.current.focus();
+        }
+      }, 50);
+    }
+  };
+
+  /* 顶栏即时悬停气泡调度（0ms 响应，浮动置顶） */
+  const showTip = (ev, text) => {
+    if (!text) return;
+    const r = ev.currentTarget.getBoundingClientRect();
+    setTipInfo({
+      text,
+      x: Math.round(r.left + r.width / 2),
+      y: Math.round(r.top - 7),
+    });
+  };
+
+  const hideTip = () => {
+    setTipInfo(null);
+  };
+
+  /* 同步到当前项目（纯复制写盘，不删除源便签） */
+  const handleSyncToProject = async () => {
+    if (isExporting) return;
+    if (!selectedNote) {
+      qnToast("请先选择或新建便签");
+      return;
+    }
+    if (!currentRootPath) {
+      qnToast("当前未打开任何项目");
+      return;
+    }
+    setIsExporting(true);
+    try {
+      await flushSave();
+      let res = await host
+        .call("workbench.qnSyncTo", {
+          name: selectedNote.name,
+          targetDir: currentRootPath,
+        })
+        .catch(() => null);
+
+      if (!res || !res.ok) {
+        /* 热插拔自愈兜底：若后台尚未重启生效新路由，经 qnMoveToKb 并在源端保留副本实现同步 */
+        const text = activeNoteText;
+        const prevKb = notesStore.current || (notesStore.dirs && notesStore.dirs[0]);
+        await host.call("workbench.notesSelect", { dir: currentRootPath }).catch(() => {});
+        res = await host
+          .call("workbench.qnMoveToKb", {
+            name: selectedNote.name,
+            targetDir: currentRootPath,
+          })
+          .catch(() => null);
+        if (prevKb && prevKb !== currentRootPath) {
+          await host.call("workbench.notesSelect", { dir: prevKb }).catch(() => {});
+        }
+        /* 关键：同步语义绝不删除源便签，立刻将源便签恢复写回便签池 */
+        await host.call("workbench.qnCreate", { title: selectedNote.title, content: text }).catch(() => {});
+        qnStore.set({ selected: selectedNote.name });
+      }
+
+      if (res && res.ok) {
+        qnToast("已同步到项目: " + baseName(res.path));
+        await qnLoadNotes(qnStore.q);
+      } else {
+        qnToast("同步失败: " + ((res && res.error) || "未知错误"));
+      }
+    } catch (e) {
+      qnToast("同步异常: " + (e.message || e));
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  /* 同步到当前知识库（纯复制写盘，不删除源便签） */
+  const handleSyncToKb = async () => {
+    if (isExporting) return;
+    if (!selectedNote) {
+      qnToast("请先选择或新建便签");
+      return;
+    }
+    setIsExporting(true);
+    try {
+      await flushSave();
+      let target = kbDir;
+      if (!target) {
+        const base = pathDir(currentRootPath || "") || "~";
+        const defDir = pathJoinFor(base, "知识库");
+        const resDef = await host.call("workbench.notesSelect", { dir: defDir });
+        if (resDef && resDef.current) target = resDef.current;
+      }
+      if (!target) {
+        qnToast("请先在左侧选择知识库目录");
+        return;
+      }
+      let res = await host
+        .call("workbench.qnSyncTo", {
+          name: selectedNote.name,
+          targetDir: target,
+        })
+        .catch(() => null);
+
+      if (!res || !res.ok) {
+        /* 热插拔自愈兜底：若后台尚未重启生效新路由，经 qnMoveToKb 并在源端保留副本实现同步 */
+        const text = activeNoteText;
+        res = await host
+          .call("workbench.qnMoveToKb", {
+            name: selectedNote.name,
+            targetDir: target,
+          })
+          .catch(() => null);
+        /* 关键：同步语义绝不删除源便签，立刻将源便签恢复写回便签池 */
+        await host.call("workbench.qnCreate", { title: selectedNote.title, content: text }).catch(() => {});
+        qnStore.set({ selected: selectedNote.name });
+      }
+
+      if (res && res.ok) {
+        qnToast("已同步到知识库: " + baseName(res.path));
+        await qnLoadNotes(qnStore.q);
+      } else {
+        qnToast("同步失败: " + ((res && res.error) || "未知错误"));
+      }
+    } catch (e) {
+      qnToast("同步异常: " + (e.message || e));
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  /* 目录 @ 引用功能：目录下每个便签按各自文件路径插成 @ 提及（与侧边栏文件 @ 同机制） */
+  const handleQuoteFolder = (folderName) => {
+    const allNotes = qnStore.notes || [];
+    const folderNotes = folderName === null
+      ? allNotes
+      : allNotes.filter((n) => n.folder === folderName);
+
+    if (folderNotes.length === 0) {
+      qnToast("该目录下暂无便签可引用");
+      return;
+    }
+    const sid = qnActiveSid();
+    if (!sid) {
+      qnToast("无活跃会话，无法引用");
+      return;
+    }
+    let okCount = 0;
+    for (const n of folderNotes) {
+      if (qnMentionNote(sid, n.name)) okCount++;
+    }
+    if (okCount > 0) {
+      qnToast("已引用 " + okCount + " 个便签");
+    } else {
+      qnToast("引用失败，请稍后重试");
+    }
+  };
+
   return e(
     "div",
-    { className: "pw-bpanel" + (bottomPanel.open && entered ? "" : " off"), style: { left: rect.left, width: rect.width, height: bottomPanel.height } },
-    e("div", { className: "pw-bpanel-drag", title: "拖拽调整高度", onMouseDown: startDrag }),
+    {
+      "data-pw-qn": "geek-notes",
+      className: "pw-qn-drawer",
+      style: {
+        left: colRect.left + "px",
+        width: colRect.width + "px",
+        height: qnStore.height + "px",
+      },
+    },
+    /* 顶部拖拽手柄（标准细线风格，悬停微弱高亮，无原生提示框） */
+    e("div", {
+      className: "pw-qn-drag",
+      onPointerDown: onDragStart,
+    }),
+
+    /* 极简顶栏（与侧栏通体同色背景，标准 1px 分割线） */
     e(
       "div",
-      { className: "pw-bpanel-tabs" },
-      acpTabs.tabs.map((tb) => {
-        const c = acpTabs.clients[tb.id];
-        const st = c ? c.status : "connecting";
-        return e(
-          "span",
+      { className: "pw-qn-header" },
+      /* 左侧操作组：+ 图标、紧凑搜索框、AI 生成标题 */
+      e(
+        "div",
+        { className: "pw-qn-header-left" },
+        /* 目录栏展开/收起缩放按钮（加号左边） */
+        e(
+          "button",
           {
-            key: tb.id,
-            className: "pw-bpanel-tab pw-bpanel-atab" + (tab === tb.id ? " on" : ""),
-            title: tb.cwd + "\nKimi Code：" + (ACP_STATUS[st] || ACP_STATUS.connecting).label,
-            onClick: () => bottomPanel.set({ tab: tb.id }),
+            className: "pw-icon-btn" + (showFolders ? " active" : ""),
+            onMouseEnter: (ev) => showTip(ev, showFolders ? "收起目录栏" : "展开目录栏"),
+            onMouseLeave: hideTip,
+            onClick: () => {
+              const next = !showFolders;
+              setShowFolders(next);
+              qnStore.set({ showFolders: next });
+              try { window.localStorage.setItem("pw-qn-show-folders", String(next)); } catch {}
+            },
           },
-          e("span", { className: "pw-tab-dot " + st }),
-          e("span", { className: "pw-tab-name" }, tb.name),
+          SidebarToggleIcon(14),
+        ),
+        /* 新建便签 +：标准 pw-icon-btn 风格与 PlusIcon(13) */
+        e(
+          "button",
+          {
+            className: "pw-icon-btn",
+            onMouseEnter: (ev) => showTip(ev, "新建便签"),
+            onMouseLeave: hideTip,
+            onClick: handleCreateNew,
+          },
+          PlusIcon(13),
+        ),
+        /* 新增目录按钮（加号右边） */
+        e(
+          "button",
+          {
+            className: "pw-icon-btn",
+            onMouseEnter: (ev) => showTip(ev, "新建目录"),
+            onMouseLeave: hideTip,
+            onClick: () => {
+              if (!showFolders) {
+                setShowFolders(true);
+                qnStore.set({ showFolders: true });
+                try { window.localStorage.setItem("pw-qn-show-folders", "true"); } catch {}
+              }
+              setIsCreatingFolder(true);
+              setNewFolderVal("");
+            },
+          },
+          FolderPlusIcon(14),
+        ),
+        /* 紧凑搜索框（与侧栏统一规范） */
+        e(
+          "div",
+          { className: "pw-qn-search-wrap" },
+          e("span", { className: "pw-qn-search-ico" }, SearchIcon(12)),
+          e("input", {
+            className: "pw-qn-search-input",
+            placeholder: "搜索便签...",
+            value: qnStore.q || "",
+            onChange: (ev) => {
+              const q = ev.target.value;
+              qnStore.set({ q });
+              qnLoadNotes(q);
+            },
+          }),
+        ),
+        /* 生成标题按钮（纯文字，与搜索框高度严格一致） */
+        e(
+          "button",
+          {
+            className: "pw-qn-gen-btn" + (genState.kind === "busy" ? " busy" : ""),
+            disabled: genState.kind === "busy" || !selectedNote,
+            title: "使用 AI 模型根据便签内容生成标题并改名",
+            onClick: handleGenerateTitle,
+          },
+          genState.kind === "busy"
+            ? "生成中…"
+            : genState.kind === "done"
+            ? "标题已更新"
+            : "生成标题",
+        ),
+        /* 对称同步按键组：透明排布，间距仅 2px，颜色淡雅 */
+        e(
+          "div",
+          { style: { display: "inline-flex", alignItems: "center", gap: "2px" } },
+          /* 同步到当前项目（左箭头）：独立图标按钮，淡雅色调 */
           e(
-            "span",
+            "button",
             {
-              className: "pw-tab-x",
-              title: "关闭（断开并回收 agent 进程）",
-              onClick: (ev) => {
-                ev.stopPropagation();
-                acpTabs.close(tb.id);
+              className: "pw-icon-btn pw-qn-sync-btn" + (!selectedNote ? " is-disabled" : ""),
+              disabled: isExporting,
+              onMouseEnter: (ev) =>
+                showTip(
+                  ev,
+                  currentRootPath
+                    ? `同步到项目：将当前便签同步保存到项目 (${shortenPath(currentRootPath)})`
+                    : "同步到项目：将当前便签同步保存到当前项目根目录"
+                ),
+              onMouseLeave: hideTip,
+              onClick: handleSyncToProject,
+            },
+            ForkProjectIcon(15),
+          ),
+          /* 同步到当前知识库（右箭头）：独立图标按钮，淡雅色调 */
+          e(
+            "button",
+            {
+              className: "pw-icon-btn pw-qn-sync-btn" + (!selectedNote ? " is-disabled" : ""),
+              disabled: isExporting,
+              onMouseEnter: (ev) =>
+                showTip(
+                  ev,
+                  kbDir
+                    ? `同步到知识库：将当前便签同步保存到知识库 (${shortenPath(kbDir)})`
+                    : "同步到知识库：将当前便签同步保存到知识库目录"
+                ),
+              onMouseLeave: hideTip,
+              onClick: handleSyncToKb,
+            },
+            ForkKbIcon(15),
+          ),
+        ),
+      ),
+
+      /* 右侧：与侧栏「«」/右栏「»」风格完全一致的双向下尖角折叠符 */
+      /* 右侧功能组：向上最大化/还原 + 向下收起折叠符（风格完全一致，方向相反） */
+      e(
+        "div",
+        { className: "pw-qn-header-right" },
+        /* 向上扩大便签抽屉到最大 / 还原高度 */
+        e(
+          "button",
+          {
+            className: "pw-icon-btn",
+            title: isMaximized ? "还原高度" : "向上扩到最大",
+            onClick: handleToggleMaximize,
+          },
+          isMaximized ? CollapseIcon(13) : ExpandIcon(13),
+        ),
+        /* 收起下栏 (Esc) */
+        e(
+          "button",
+          {
+            className: "pw-icon-btn",
+            title: "收起下栏 (Esc)",
+            onClick: () => qnStore.set({ open: false }),
+          },
+          e("span", { className: "pw-qn-collapse-icon" }, "»"),
+        ),
+      ),
+    ),
+
+    /* 主体三栏：目录列 + 便签列表列 + Typora 编辑区（参考 Apple 备忘录架构） */
+    e(
+      "div",
+      { className: "pw-qn-body" },
+      /* 第一栏：目录栏（可展开/收起，含「全部便签」与自定义目录） */
+      showFolders &&
+        e(
+          "div",
+          {
+            className: "pw-qn-col-folders",
+            style: { width: folderWidth + "px" },
+          },
+          /* 全部便签（跨目录查看全部，支持拖入移出目录） */
+          e(
+            "div",
+            {
+              className: "pw-qn-folder-item" + (qnStore.selectedFolder === null ? " active" : "") + (dragOverFolder === "__all__" ? " drag-over" : ""),
+              onClick: () => qnStore.set({ selectedFolder: null }),
+              onDragOver: (ev) => {
+                ev.preventDefault();
+                ev.dataTransfer.dropEffect = "move";
+              },
+              onDragEnter: (ev) => {
+                ev.preventDefault();
+                setDragOverFolder("__all__");
+              },
+              onDragLeave: (ev) => {
+                if (dragOverFolder === "__all__") setDragOverFolder(null);
+              },
+              onDrop: async (ev) => {
+                ev.preventDefault();
+                setDragOverFolder(null);
+                const n = ev.dataTransfer.getData("text/plain") || draggingNote;
+                if (n) await qnMoveNoteToFolder(n, "");
               },
             },
-            "×",
+            e("span", { className: "pw-qn-folder-ico" }, AllNotesIcon(13)),
+            e("span", { className: "pw-qn-folder-name" }, "全部便签"),
+            e("span", { className: "pw-qn-folder-count" }, notes.length),
+            /* 悬停快捷按钮：引用全部便签到输入框 @ */
+            e(
+              "div",
+              {
+                className: "pw-qn-folder-acts",
+                onClick: (ev) => ev.stopPropagation(),
+              },
+              e(
+                "button",
+                {
+                  className: "pw-qn-folder-act-btn",
+                  title: "引用全部便签到输入框 (@)",
+                  onClick: () => handleQuoteFolder(null),
+                },
+                AtIcon(11),
+              ),
+            ),
           ),
-        );
+          /* 用户自定义目录项（无冗余「我的目录」行，支持拖拽放置） */
+          (qnStore.folders || []).map((f) => {
+            const count = notes.filter((n) => n.folder === f).length;
+            if (renamingFolder === f) {
+              return e(
+                "div",
+                { key: f, className: "pw-qn-folder-item active" },
+                e("input", {
+                  className: "pw-qn-folder-input",
+                  value: renameFolderVal,
+                  autoFocus: true,
+                  onFocus: (ev) => ev.target.select(),
+                  onChange: (ev) => setRenameFolderVal(ev.target.value),
+                  onKeyDown: (ev) => {
+                    if (ev.key === "Enter") {
+                      qnRenameFolder(f, renameFolderVal);
+                      setRenamingFolder(null);
+                    } else if (ev.key === "Escape") {
+                      setRenamingFolder(null);
+                    }
+                  },
+                  onBlur: () => {
+                    if (renameFolderVal.trim() && renameFolderVal.trim() !== f) {
+                      qnRenameFolder(f, renameFolderVal);
+                    }
+                    setRenamingFolder(null);
+                  },
+                }),
+              );
+            }
+            return e(
+              "div",
+              {
+                key: f,
+                className: "pw-qn-folder-item" + (qnStore.selectedFolder === f ? " active" : "") + (dragOverFolder === f ? " drag-over" : ""),
+                onClick: () => qnStore.set({ selectedFolder: f }),
+                onDragOver: (ev) => {
+                  ev.preventDefault();
+                  ev.dataTransfer.dropEffect = "move";
+                },
+                onDragEnter: (ev) => {
+                  ev.preventDefault();
+                  setDragOverFolder(f);
+                },
+                onDragLeave: (ev) => {
+                  if (dragOverFolder === f) setDragOverFolder(null);
+                },
+                onDrop: async (ev) => {
+                  ev.preventDefault();
+                  setDragOverFolder(null);
+                  const n = ev.dataTransfer.getData("text/plain") || draggingNote;
+                  if (n) await qnMoveNoteToFolder(n, f);
+                },
+              },
+              e("span", { className: "pw-qn-folder-ico" }, FolderSimpleIcon(13)),
+              e("span", { className: "pw-qn-folder-name", title: f }, f),
+              e("span", { className: "pw-qn-folder-count" }, count),
+              /* 鼠标悬停出现引用、重命名、删除按钮 */
+              e(
+                "div",
+                {
+                  className: "pw-qn-folder-acts",
+                  onClick: (ev) => ev.stopPropagation(),
+                },
+                /* 引用该目录到输入框 @ */
+                e(
+                  "button",
+                  {
+                    className: "pw-qn-folder-act-btn",
+                    title: `引用目录「${f}」全部便签到输入框 (@)`,
+                    onClick: () => handleQuoteFolder(f),
+                  },
+                  AtIcon(11),
+                ),
+                e(
+                  "button",
+                  {
+                    className: "pw-qn-folder-act-btn",
+                    title: "重命名目录",
+                    onClick: () => {
+                      setRenamingFolder(f);
+                      setRenameFolderVal(f);
+                    },
+                  },
+                  PencilIcon(10),
+                ),
+                e(
+                  "button",
+                  {
+                    className: "pw-qn-folder-act-btn",
+                    title: "删除目录",
+                    onClick: () => qnDeleteFolder(f),
+                  },
+                  TrashIcon(10),
+                ),
+              ),
+            );
+          }),
+          /* 新增目录输入框 */
+          isCreatingFolder &&
+            e(
+              "div",
+              { className: "pw-qn-folder-item active" },
+              e("input", {
+                className: "pw-qn-folder-input",
+                placeholder: "新目录名称...",
+                value: newFolderVal,
+                autoFocus: true,
+                onChange: (ev) => setNewFolderVal(ev.target.value),
+                onKeyDown: (ev) => {
+                  if (ev.key === "Enter") {
+                    if (newFolderVal.trim()) {
+                      qnCreateFolder(newFolderVal.trim());
+                    }
+                    setIsCreatingFolder(false);
+                  } else if (ev.key === "Escape") {
+                    setIsCreatingFolder(false);
+                  }
+                },
+                onBlur: () => {
+                  if (newFolderVal.trim()) {
+                    qnCreateFolder(newFolderVal.trim());
+                  }
+                  setIsCreatingFolder(false);
+                },
+              }),
+            ),
+        ),
+
+      /* 目录栏与列表栏之间的调整线 */
+      showFolders &&
+        e("div", {
+          className: "pw-qn-col-resizer",
+          onPointerDown: onFolderResizerStart,
+        }),
+
+      /* 第二栏：便签列表（根据选中目录筛选展示） */
+      e(
+        "div",
+        {
+          className: "pw-qn-col-list",
+          style: { width: listWidth + "px" },
+        },
+        qnStore.loading && visibleNotes.length === 0
+          ? e("div", { className: "pw-qn-empty-hint" }, "载入中…")
+          : visibleNotes.length === 0
+          ? e(
+              "div",
+              { className: "pw-qn-empty-hint" },
+              qnStore.selectedFolder
+                ? `目录「${qnStore.selectedFolder}」暂无便签\n点击上方「+」新建`
+                : "无便签\n点击上方「+」新建",
+            )
+          : visibleNotes.map((item) => {
+              const thumb = qnExtractFirstImage(item.preview || "");
+              const isCur = qnStore.selected === item.name;
+              const isRenaming = renamingName === item.name;
+
+              return e(
+                "div",
+                {
+                  key: item.name,
+                  className: "pw-qn-side-item" + (isCur ? " active" : "") + (draggingNote === item.name ? " is-dragging" : ""),
+                  draggable: !isRenaming,
+                  onDragStart: (ev) => {
+                    ev.dataTransfer.setData("text/plain", item.name);
+                    ev.dataTransfer.effectAllowed = "move";
+                    setDraggingNote(item.name);
+                  },
+                  onDragEnd: () => {
+                    setDraggingNote(null);
+                    setDragOverFolder(null);
+                  },
+                  onClick: async () => {
+                    if (isRenaming) return;
+                    await flushSave();
+                    qnStore.set({ selected: item.name });
+                  },
+                },
+                e(
+                  "div",
+                  { className: "pw-qn-side-main" },
+                  isRenaming
+                    ? e("input", {
+                        className: "pw-qn-rename-input",
+                        autoFocus: true,
+                        value: renameVal,
+                        onFocus: (ev) => ev.target.select(),
+                        onClick: (ev) => ev.stopPropagation(),
+                        onChange: (ev) => setRenameVal(ev.target.value),
+                        onKeyDown: async (ev) => {
+                          if (ev.key === "Enter") {
+                            ev.stopPropagation();
+                            const newT = renameVal.trim();
+                            setRenamingName(null);
+                            if (newT && newT !== item.title) {
+                              await qnUpdateNote(item.name, item.preview || " ", newT);
+                            }
+                          } else if (ev.key === "Escape") {
+                            ev.stopPropagation();
+                            setRenamingName(null);
+                          }
+                        },
+                        onBlur: async () => {
+                          const newT = renameVal.trim();
+                          setRenamingName(null);
+                          if (newT && newT !== item.title) {
+                            await qnUpdateNote(item.name, item.preview || " ", newT);
+                          }
+                        },
+                      })
+                    : e("div", { className: "pw-qn-side-title", title: item.title }, item.title || "无标题"),
+                  e(
+                    "div",
+                    { className: "pw-qn-side-row" },
+                    e("span", { className: "pw-qn-side-time" }, qnFormatAppleDate(item.mtime)),
+                    /* 显示目录归属标签（参考苹果备忘录） */
+                    item.folder
+                      ? e(
+                          "span",
+                          {
+                            className: "pw-qn-side-folder-tag",
+                            title: "所属目录：" + item.folder,
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              qnStore.set({ selectedFolder: item.folder });
+                            },
+                          },
+                          FolderSimpleIcon(9),
+                          item.folder,
+                        )
+                      : null,
+                    e("span", { className: "pw-qn-side-snippet" }, qnStripMarkdown(item.preview || "无内容")),
+                  ),
+                ),
+                thumb && e("img", { src: thumb, className: "pw-qn-side-thumb", alt: "" }),
+                /* 鼠标悬停在卡片上展现的标准尺寸按钮组（与侧边栏 session-row 完全同款：pw-row-acts + pw-act-btn） */
+                !isRenaming &&
+                  (cnf[0] === item.name
+                    ? e(
+                        "div",
+                        { className: "pw-row-acts" },
+                        /* 确认删除（二次点击才真正删除） */
+                        e(
+                          "button",
+                          {
+                            className: "pw-act-btn danger",
+                            title: "确认删除该便签",
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              cnf[2]();
+                              qnDeleteNote(item.name);
+                            },
+                          },
+                          "✓",
+                        ),
+                        e(
+                          "button",
+                          {
+                            className: "pw-act-btn",
+                            title: "取消删除",
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              cnf[2]();
+                            },
+                          },
+                          "×",
+                        ),
+                      )
+                    : e(
+                        "div",
+                        { className: "pw-row-acts" },
+                        /* 引用到对话 @ */
+                        e(
+                          "button",
+                          {
+                            className: "pw-act-btn",
+                            title: "引用到输入框",
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              const sid = qnActiveSid();
+                              if (!sid) {
+                                qnToast("无活跃会话，无法引用");
+                                return;
+                              }
+                              if (qnMentionNote(sid, item.name)) {
+                                qnToast("已引用到输入框");
+                              } else {
+                                qnToast("引用失败，请稍后重试");
+                              }
+                            },
+                          },
+                          AtIcon(13),
+                        ),
+                        /* 改名 */
+                        e(
+                          "button",
+                          {
+                            className: "pw-act-btn",
+                            title: "重命名",
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              setRenamingName(item.name);
+                              setRenameVal(item.title || "");
+                            },
+                          },
+                          PencilIcon(13),
+                        ),
+                        /* 删除 */
+                        e(
+                          "button",
+                          {
+                            className: "pw-act-btn danger",
+                            title: "删除便签（需确认）",
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              cnf[1](item.name);
+                            },
+                          },
+                          TrashIcon(13),
+                        ),
+                      )
+                  ),
+              );
+            }),
+      ),
+
+      /* 纵向拖拽调整线（标准细线风格，悬停微弱高亮，与全局边框粗细完全一致） */
+      e("div", {
+        className: "pw-qn-col-resizer",
+        onPointerDown: onResizerStart,
       }),
-      e("button", { className: "pw-bpanel-add", title: "接入 Kimi Code：选择目录", onClick: addAgent }, "＋"),
-      e("span", { className: "pw-bpanel-flex" }),
-      /* 终端挪右端：智能体 tabs 是主角居左；关闭钮与左右侧栏同族（» 转 90° 向下） */
+
+      /* 第三栏：Typora 风格纯粹编辑即预览（全高度沉浸画布） */
       e(
-        "button",
-        { className: "pw-bpanel-tab" + (tab === "terminal" ? " on" : ""), onClick: () => bottomPanel.set({ tab: "terminal" }) },
-        "终端",
-      ),
-      e(
-        "button",
-        { className: "pw-bpanel-col", title: "收起下栏", onClick: () => bottomPanel.set({ open: false }) },
-        e("span", { className: "pw-bpanel-col-arrow" }, "»"),
+        "div",
+        { className: "pw-qn-col-paper" },
+        selectedNote
+          ? e("div", {
+              ref: canvasRef,
+              className: "pw-qn-typora-canvas",
+              contentEditable: true,
+              suppressContentEditableWarning: true,
+              onInput: onEditorInput,
+              onPaste: handlePaste,
+              onClick: onCanvasClick,
+            })
+          : null,
       ),
     ),
-    e(
-      "div",
-      { className: "pw-bpanel-body" },
-      tab === "terminal" || !activeClient ? e(TerminalView, null) : e(AgentTabView, { client: activeClient }),
-    ),
+
+    /* 悬浮 Toast 提示 */
+    qnStore.toast && e("div", { className: "pw-qn-toast" }, qnStore.toast),
+
+    /* 顶栏即时浮动气泡（0ms 响应，置顶防 overflow 裁剪） */
+    tipInfo
+      ? e(
+          "div",
+          {
+            className: "pw-qn-tip",
+            style: { left: tipInfo.x + "px", top: tipInfo.y + "px" },
+          },
+          tipInfo.text,
+        )
+      : null,
+  );
+}
+
+function QuickNotesHost() {
+  const [, force] = React.useState(0);
+  React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
+
+  React.useEffect(() => {
+    function onKeyDown(ev) {
+      if (ev.key === "Escape" && qnStore.open) {
+        qnStore.set({ open: false });
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(QnSelectionBubble, null),
+    React.createElement(QuickNotesPanel, null),
   );
 }
 
@@ -4494,11 +6382,17 @@ return {
     const s = t.get("layout"),
       o = t.get("sessions"),
       a = t.get("workspaces");
-    (mountStyle(API + "/wb/style.css"),
+    (mountStyle(API + "/wb/style.css?v=2.1.0&t=" + Date.now()),
       host
         .call("workbench.notesGet", {})
         .then((u) => {
           u && notesStore.set(u);
+        })
+        .catch(() => {}),
+      host
+        .call("workbench.qnState", {})
+        .then((u) => {
+          u && u.ok && qnStore.set({ dir: u.dir, custom: u.custom, capture: u.capture });
         })
         .catch(() => {}));
     const l = fileMentionBridge;
@@ -4511,20 +6405,10 @@ return {
       close: (id) => panelStore.close(id),
       isOpen: (id) => panelStore.isOpen(id),
     };
-    /* 底部区域仲裁服务：第三方经 ctx.inject(['dshBottomPanels'], cb) 接入。
-       acquire(id) 独占占位（排他，被占即 false），占位期间我们的底部面板让位
-       （渲染 null + 撤挤压，open 状态保留）；release(id) 归还后自动归位。
-       对齐右栏 details 单槽 priority 的让位语义——shell.overlay 是多槽，无平台仲裁，故自建。 */
-    t.provide("dshBottomPanels");
-    t.dshBottomPanels = {
-      acquire: (id) => bottomArea.acquire(id),
-      release: (id) => bottomArea.release(id),
-      owner: () => bottomArea.owner,
-      isYielded: () => bottomArea.isYielded(),
-    };
     /* @文件引用走 rc.8 原生 ui-reference 源（reference 组），插件不再注册
        * 自有 workbenchFile 组（v1.16.0 起移除，能力重叠）。
-       * 侧栏"提及"仍走 dshFileMention 桥（insert-text 纯文本路径，原生无对应物）。 */
+       * 侧栏/详情"提及"仍走 dshFileMention 桥，但改投 slash/input-insert-reference
+       * 插成本地 chip（复用 reference 源 codec），与输入框原生 @ 一致。 */
     (e.inject("sidebar.workspaces", () =>
         e.register({ name: "sidebar.workspaces", priority: -5 }, (u) =>
           React.createElement(Sidebar, {
@@ -4534,6 +6418,7 @@ return {
             layout: s,
             sessionsSvc: o,
             workspacesSvc: a,
+            workspaceNav: t.get("uiWorkspace"),
             mentionBridge: l,
           }),
         ),
@@ -4564,8 +6449,18 @@ return {
           }),
         ),
       ),
+      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
+       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览；修饰键点击
+       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
+      installDelivChipHook(),
+      /* 便签小胶囊引用源通道注册（15-quicknotes）：通过 inputTriggers 注册 @geek-notes-quote 源 */
+      installQnQuote(t),
+      /* DirPicker 单实例宿主：多处路径选择（项目/笔记/便签）共用的应用内目录选择模态 */
       e.inject("shell.overlay", () =>
-        e.register({ name: "shell.overlay", id: "workbench-bottom-panel" }, () => React.createElement(BottomPanel, { workspacesSvc: a })),
+        e.register({ name: "shell.overlay", id: "workbench-dir-picker" }, () => React.createElement(DirPickerHost, null)),
+      ),
+      e.inject("shell.overlay", () =>
+        e.register({ name: "shell.overlay", id: "workbench-quick-notes" }, () => React.createElement(QuickNotesHost, null)),
       ),
       e.inject("shell.overlay", () =>
         e.register(
@@ -4600,7 +6495,13 @@ return {
     }
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 
-    function shortenPath(p) { return String(p || '').replace(/^\/(?:Users|home)\/[^/]+/, '~') }
+    function shortenPath(p) { return String(p || '').replace(/^\/(?:Users|home)\/[^/]+/, '~').replace(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+/, '~') }
+    /* 展示用拼接：按基准路径自身的分隔符风格（Windows 反斜杠路径不混入正斜杠） */
+    function joinDisplay(base, leaf) {
+      const s = String(base || '')
+      const sep = s.includes('\\') ? '\\' : '/'
+      return s.replace(/[\\/]+$/, '') + sep + leaf
+    }
     function shortVersion(v) { return v ? String(v).slice(0, 8) : 'unknown' }
     function updateKey(skill) { return skill.install ? skill.install.scope + '\0' + skill.install.package : null }
     function groupOf(skill) {
@@ -4721,7 +6622,7 @@ return {
           props.onInstalled()
         } catch (e) { setInstallError(String(e && e.message ? e.message : e)) } finally { setInstalling(null) }
       }
-      const installPath = scope === 'global' ? shortenPath(props.globalDir) + '/' : shortenPath(props.cwd) + '/.agents/skills/'
+      const installPath = scope === 'global' ? joinDisplay(shortenPath(props.globalDir), '') : joinDisplay(shortenPath(props.cwd), '.agents/skills/')
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', height: '100%' } },
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 } },
@@ -4945,7 +6846,7 @@ return {
                     style: { fontSize: 11, fontFamily: MONO, padding: '2px 6px', border: '1px solid ' + V.accent, borderRadius: 4, background: V.bg, color: V.text, outline: 'none', width: 220 },
                   })
                 : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-                    h('code', { style: { fontSize: 11, color: V.muted, fontFamily: MONO, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: 'global 技能目录' }, shortenPath(globalDir) + '/'),
+                    h('code', { style: { fontSize: 11, color: V.muted, fontFamily: MONO, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: 'global 技能目录' }, joinDisplay(shortenPath(globalDir), '')),
                     h('button', {
                       onClick: () => { setPathDraft(globalDir); setPathEditing(true) },
                       title: '编辑 global 技能目录',
@@ -5034,7 +6935,9 @@ return {
 
     /* ============================ 模块出口 ============================ */
     exports.name = 'dsh-geek-sidebar'
-    exports.inject = ['sessions', 'slots']
+    /* uiWorkspace / workspaces / layout：workbench 硬依赖；未声明时 fiber 可在服务就绪前
+     * apply，ctx.get("uiWorkspace") 得 undefined 且闭包固化——「＋ 新建」静默无反应。 */
+    exports.inject = ['sessions', 'slots', 'uiWorkspace', 'workspaces', 'layout']
     exports.apply = function apply(ctx) {
       /* filemention 必须先于 workbench：后者经 fileMentionBridge 惰性取用
        *（ctx.get 在 fiber 启动态拿不到，见 head.js 桥注释） */

@@ -15,16 +15,33 @@ const sessionProbe = {
     return bus.sub(t);
   },
 };
-function mentionPath(t, e) {
-  const s = currentRootPath;
-  return (
-    "@" +
-    (s && t.indexOf(s + "/") === 0 ? t.slice(s.length + 1) : t) +
-    (e ? "/ " : " ")
-  );
+/* 当前会话 cwd（chat 文件点击接管反解相对路径用）；09-sidebar 的会话订阅效应同步写 */
+const sessionCwd = { sid: null, cwd: null };
+/* @提及引用块（ReferenceInsert，原生 chip 路径）：与输入框原生 @ 菜单一致——把选中文件
+ * 插成整体 chip，退格一次整块删除。ref/clipboardText 用原生 formatFileMention 同款引号规则
+ *（含空格路径 `@"..."`；目录保持开引号以续补）。相对路径逻辑与旧 mentionPath 一致：
+ * 位于当前项目根下时取相对路径，否则取绝对路径；opts.abs 强制绝对路径（知识库分栏用）。 */
+function mentionRef(t, e, opts) {
+  const abs = !!(opts && opts.abs);
+  let shown = t;
+  if (!abs) {
+    const s = currentRootPath;
+    if (s && t !== s && pathHasPrefix(t, s)) shown = t.slice(s.length + 1);
+  }
+  const dir = e === true;
+  const at = dir ? shown + "/" : shown;
+  const q = /\s/u.test(at);
+  const mention = q ? (dir ? '@"' + at : '@"' + at + '"') : "@" + at;
+  return {
+    source: "reference",
+    ref: mention,
+    label: baseName(t) + (dir ? "/" : ""),
+    appearance: dir ? "folder" : "file",
+    clipboardText: mention,
+  };
 }
-/* 评审修复：两击确认状态机——原 03 树删除 / 08 归档 / 09 worktree / 15-acp 历史
- * 四处各抄一份 useState。返回 [armedId, ask(id), cancel()]；布尔场景用常量 id（如 1）。
+/* 评审修复：两击确认状态机——原 03 树删除 / 08 归档 / 09 worktree 等
+ * 多处各抄一份 useState。返回 [armedId, ask(id), cancel()]；布尔场景用常量 id（如 1）。
  * 各调用点以适配器保持原签名（is(id) === (armed === id)），行为逐点不变 */
 function useTwoClick() {
   const t = React.useState(null);

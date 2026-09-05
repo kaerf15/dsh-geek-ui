@@ -1,16 +1,14 @@
 #!/usr/bin/env node
 // dsh-geek-sidebar client.js 拼装器：head + workbench/*(按文件名序) + skills + tail（纯拼接）。
-// vendor-xterm.js 不再拼进 bundle（284KB 求值期全量解析，与终端惰性策略矛盾）——
-// 拷到 lib/ 由 host /wb/vendor-xterm.js 直出，首开终端时 <script> 按需注入。
 // 各 feature 的可读维护源码都在 parts/；workbench 按域拆在 parts/workbench/ 目录，
 // 数字前缀即拼接顺序。任意目录下可运行（ROOT 取自脚本位置）：
 //   node dsh-plugins/dsh-geek-sidebar/parts/build.mjs   或   npm run build
 // 注意：apply 所在文件必须排最后——IIFE 体内的 return 之后是死代码，
-// 函数声明可提升但 const/let 不会初始化（15-bottom-panel 的 ANSI 常量曾因此 TDZ）。
+// 函数声明可提升但 const/let 不会初始化（历史上的 15-bottom-panel ANSI 常量曾因此 TDZ）。
 // 下方两条构建期断言把这条纪律工具化（评审 P2：拼接架构的最低限度护栏）：
 //   A. 只有排序最后的 part 允许出现顶层 return；
 //   B. 各 part 顶层符号（行首 function/const/let/var/class）不得重名。
-import { copyFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -52,6 +50,4 @@ const WB_PART = 'const workbenchMod = (function (React, host) {\n' + wb + '\n})(
 
 const out = read(join(ROOT, 'parts', 'head.js')) + WB_PART + '\n' + read(join(ROOT, 'parts', 'skills.js')) + read(join(ROOT, 'parts', 'tail.js'))
 writeFileSync(join(ROOT, 'lib', 'client.js'), out)
-/* xterm vendor 随构建拷到 lib/，host /wb/vendor-xterm.js 直出、client 首开终端按需注入 */
-copyFileSync(join(ROOT, 'parts', 'vendor-xterm.js'), join(ROOT, 'lib', 'vendor-xterm.js'))
-console.log('client.js written,', out.length, 'bytes ·', parts.length, 'parts ·', seen.size, 'top-level symbols checked · vendor-xterm.js copied')
+console.log('client.js written,', out.length, 'bytes ·', parts.length, 'parts ·', seen.size, 'top-level symbols checked')

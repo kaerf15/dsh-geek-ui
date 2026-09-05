@@ -1,6 +1,27 @@
 const isMd = (t) => /\.(md|markdown)$/i.test(t);
 /* 评审修复：bd（链接/图片解析基目录）显式传参——原经 12-mdpath 的模块级
  * var mdBaseDir 隐式传递，渲染期写共享态（并发/顺序敏感）。行为逐点保持 */
+/* 图片渲染走组件：失败态收进 React state（评审修复 N2）——原先 onError 直接
+ * parentNode.insertBefore 往 React 托管容器塞外来节点，markdown 重建时占位 span
+ * 无人回收、永久残留（图片修好了「加载失败」还在）。 */
+function MdImg(props) {
+  const [broken, setBroken] = React.useState(false);
+  if (broken)
+    return React.createElement(
+      "span",
+      { className: "pw-img-broken" },
+      "图片加载失败：" + (props.alt || props.raw),
+    );
+  return React.createElement("img", {
+    src: props.src,
+    alt: props.alt,
+    style: { maxWidth: "100%" },
+    onClick: (g) => {
+      (g.stopPropagation(), imgZoomStore.set(props.src));
+    },
+    onError: () => setBroken(true),
+  });
+}
 function mdInline(t, bd) {
   const e = [],
     s =
@@ -26,32 +47,24 @@ function mdInline(t, bd) {
     else if (c.startsWith("![")) {
       const u = c.match(/!\[([^\]]*)\]\(([^)]*)\)/);
       e.push(
-        React.createElement("img", {
+        React.createElement(MdImg, {
           key: l++,
           src: mediaUrl(u[2], bd),
           alt: u[1],
-          style: { maxWidth: "100%" },
-          onClick: (g) => {
-            (g.stopPropagation(), imgZoomStore.set(mediaUrl(u[2], bd)));
-          },
-          onError: (g) => {
-            const t = g.currentTarget;
-            t.style.display = "none";
-            const ph = document.createElement("span");
-            ph.className = "pw-img-broken";
-            ph.textContent = "图片加载失败：" + (u[1] || u[2]);
-            t.parentNode && t.parentNode.insertBefore(ph, t);
-          },
+          raw: u[2],
         }),
       );
     } else if (c.startsWith("[")) {
       const u = c.match(/\[([^\]]*)\]\(([^)]*)\)/);
+      /* javascript:/vbscript: 协议拦截（评审修复 N3）：点击经 resolveLocalPath 已拦，
+       * 但 href 会原样落 DOM——中键/新标签打开场景收一道口。 */
+      const href = /^\s*(javascript|vbscript)\s*:/i.test(u[2]) ? "#" : u[2];
       e.push(
         React.createElement(
           "a",
           {
             key: l++,
-            href: u[2],
+            href: href,
             target: "_blank",
             rel: "noreferrer",
             onClick: (g) => {

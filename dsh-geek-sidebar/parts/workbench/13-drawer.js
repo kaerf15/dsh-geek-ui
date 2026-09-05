@@ -47,6 +47,8 @@ function PreviewDrawer(t) {
         /* 评审修复：删掉 sessionId 死 prop——Details 只读 sessionProbe.sid，从不消费该 prop。
          *（16-apply 的 PanelHost 仍保留 sessionId：那是 dshDetailsPanels 三方驱动的服务面，非 Details 私有） */
         layout: t.layout,
+        /* drawer 本来就是宽面板，缩放钮只在右栏模式出场 */
+        inDrawer: !0,
         workspacesSvc: t.workspacesSvc,
         mentionBridge: t.mentionBridge,
       }),

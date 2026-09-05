@@ -3,6 +3,7 @@ function Sidebar(t) {
     s = t.layout,
     o = t.sessionsSvc,
     a = t.workspacesSvc,
+    nav = t.workspaceNav,
     l = useView(),
     c = useNotes(),
     u = useFilesTab(),
@@ -12,7 +13,12 @@ function Sidebar(t) {
     h = t.useWorkspaces((n) => n.items),
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
     y = t.useWorkspaces((n) => n.archivedSessionIds),
-    x = React.useState(null),
+    x = React.useState(() => {
+      const cur = k && m && m[k] && m[k].cwd;
+      if (cur) return cur;
+      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
+      return (n && n.path) || null;
+    }),
     p = x[0],
     C = x[1],
     I = React.useState({}),
@@ -57,12 +63,10 @@ function Sidebar(t) {
   React.useEffect(() => {
     u === "notes" && ke(!0);
   }, [u]);
-  const be = React.useState(!1),
-    Pe = be[0],
-    we = be[1],
-    ge = React.useState(!1),
-    Ne = ge[0],
-    ve = ge[1],
+  /* 焦点自动刷 git 元数据（分支徽标/worktree 列表，平时走 host gitCache，外部 checkout /
+   * worktree add 后会过期）：切回页面静默强刷，节流 10s；fn 每 render 重指避免旧闭包。
+   * 原顶部手动刷新按钮随此删除（会话列表本就走 useSessions 响应式订阅，无需手刷）。 */
+  const gitAuto = React.useRef({ at: 0, busy: !1, fn: null }),
     ye = {};
   for (const n of y || []) ye[n] = !0;
   const Y = (r || []).filter((n) => {
@@ -70,20 +74,29 @@ function Sidebar(t) {
       return f && !ye[n] && f.origin !== "subagent";
     }),
     Z = k ? m[k] : void 0,
-    Se = React.useRef(null);
-  (React.useEffect(() => {
-    Z && Z.cwd && C(Z.cwd);
+    Se = React.useRef(null),
+    lastSynced = React.useRef({ sid: null, cwd: null });
+  React.useEffect(() => {
+    /* 会话工作目录同步保护：
+     * 1. 当处于有效会话且该会话有 cwd 时：若会话变更 (k 变化) 或该会话 cwd 异步到齐，严格同步为当前会话所在目录；
+     *    利用 lastSynced 记录已同步状态，避免用户手动在下拉菜单切目录时被微任务中的旧 cwd 抢占回弹；
+     * 2. 只有在平台确实没有任何活跃会话且 p 尚未初始化时，才安全回退到最近或首个工作区，绝不产生竞态覆盖。 */
+    const curCwd = Z && Z.cwd;
+    if (curCwd) {
+      if (lastSynced.current.sid !== k || lastSynced.current.cwd !== curCwd) {
+        lastSynced.current = { sid: k, cwd: curCwd };
+        C(curCwd);
+      }
+    } else if (!p) {
+      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
+      if (n && n.path) C(n.path);
+    }
     const n = Se.current;
     if (((Se.current = k || null), n && n !== k && a)) {
       const f = m[n];
       f && f.blank === !0 && a.archiveSession(n).catch(() => {});
     }
-  }, [k, Z && Z.cwd]),
-    React.useEffect(() => {
-      if (p) return;
-      const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
-      n && n.path && C(n.path);
-    }, [h, g]));
+  }, [k, Z && Z.cwd, h, g]);
   const oe = (n) => {
       const f = [],
         d = {},
@@ -117,7 +130,12 @@ function Sidebar(t) {
   }, [p]),
     React.useEffect(() => {
       sessionProbe.set(k || null);
-    }, [k]));
+      /* chat 文件点击接管的 cwd 跟踪（15-deliv）：sid/cwd 同源同拍，消费方比对 sid；
+       * m 入 deps——byId 行补齐（cwd 字段晚到）也重同步 */
+      const row = k ? m[k] : null;
+      sessionCwd.sid = k || null;
+      sessionCwd.cwd = (row && row.cwd) || null;
+    }, [k, m]));
   const ce = (n, f) =>
     n
       ? host
@@ -130,29 +148,42 @@ function Sidebar(t) {
   React.useEffect(() => {
     ce(p, !1);
   }, [p]);
-  const Te = () => {
-      if (Pe) return;
-      (ve(!1), we(!0));
-      const n = () => {
-        (we(!1), flashDone(ve));
+  ((gitAuto.current.fn = () => {
+      const n = gitAuto.current;
+      if (n.busy || document.visibilityState !== "visible") return;
+      const f = Date.now();
+      if (f - n.at < 1e4) return;
+      ((n.at = f), (n.busy = !0));
+      const d = () => {
+        n.busy = !1;
       };
-      Promise.all([oe(!0), ce(p, !0)]).then(n, n);
-    },
-    $ = {};
+      Promise.all([oe(!0), ce(p, !0)]).then(d, d);
+    }),
+    React.useEffect(() => {
+      const n = () => gitAuto.current.fn && gitAuto.current.fn();
+      (window.addEventListener("focus", n),
+        document.addEventListener("visibilitychange", n));
+      return () => {
+        (window.removeEventListener("focus", n),
+          document.removeEventListener("visibilitychange", n));
+      };
+    }, []));
+  const $ = {};
   for (const n of Y) {
     const f = m[n],
       d = ee(f.cwd);
     if (!d) continue;
-    $[d] || ($[d] = { root: d, latest: 0, running: 0, pending: 0 });
+    $[d] || ($[d] = { root: d, latest: 0, running: 0, pending: 0, done: 0 });
     const W = $[d];
     ((f.updatedAt || 0) > W.latest && (W.latest = f.updatedAt || 0),
       f.running && W.running++,
-      f.pendingInteraction && W.pending++);
+      f.pendingInteraction && W.pending++,
+      f.completed && W.done++);
   }
   (rememberRoot(M),
-    M && !$[M] && ($[M] = { root: M, latest: 0, running: 0, pending: 0 }));
+    M && !$[M] && ($[M] = { root: M, latest: 0, running: 0, pending: 0, done: 0 }));
   for (const n of recentRoots)
-    $[n] || ($[n] = { root: n, latest: 0, running: 0, pending: 0 });
+    $[n] || ($[n] = { root: n, latest: 0, running: 0, pending: 0, done: 0 });
   const Le = Object.keys($)
       .map((n) => $[n])
       .sort((n, f) => f.latest - n.latest),
@@ -175,6 +206,9 @@ function Sidebar(t) {
     aPend = te.reduce((n, f) => n + f.pending, 0),
     cRun = aRun - oRun,
     cPend = aPend - oPend,
+    oDone = oWs.reduce((n, f) => n + f.done, 0),
+    aDone = te.reduce((n, f) => n + f.done, 0),
+    cDone = aDone - oDone,
     Re = Y.filter((n) => !m[n].blank && (!M || ee(m[n].cwd) === M)).sort(
       (n, f) => (m[f].updatedAt || 0) - (m[n].updatedAt || 0),
     ),
@@ -184,46 +218,68 @@ function Sidebar(t) {
         (b.worktrees.find((n) => n.path === b.currentWorktreePath) ||
           b.worktrees.find((n) => n.isMain))) ||
       null,
+    we = (n) => {
+      if (!n) return null;
+      const f = ee(n) || n,
+        d = canonPath(f);
+      /* 1.20.2：两遍匹配——ee() 会把 worktree 路径解析回主仓库根，单轮循环里
+       * 主根查询可能先命中排在前面的 worktree 工作区，会话被开进 worktree 目录。
+       * 精确/规范化路径必须优先，根级模糊匹配只作兜底。 */
+      for (const W of h || [])
+        if (W && W.path && (W.path === n || W.path === f || canonPath(W.path) === d))
+          return W;
+      for (const W of h || [])
+        if (W && W.path && canonPath(ee(W.path)) === d) return W;
+      return null;
+    },
     _e = (n) => {
-      if (!a || !n) return;
-      const f = (h || []).find((d) => d.path === n);
+      if (!n || !nav) return;
+      const f = we(n);
       if (f) {
-        a.startSession(f.workspaceId);
+        nav.startSession(f.workspaceId);
         return;
       }
-      a.create({ path: n })
-        .then((d) => a.startSession(d.workspaceId))
+      if (!a) return;
+      const d = ee(n) || n;
+      a.create({ path: d })
+        .then((W) => nav.startSession(W.workspaceId))
         .catch(() => {});
     },
     Ve = () => {
-      a &&
-        a
-          .pickDirectory()
+      /* 1.19.11 起换应用内 DirPicker（见 15-dirpicker.js），不再依赖 native capability
+       * 的 svc.pickDirectory()；先收项目下拉再开模态。落点走默认目录（1.19.12：桌面，
+       * 星钮可自定），不再以当前项目为初始路径。
+       * 评审修复（保留语义）：新目录经 _e 连接并打开其会话——直接 connect 会丢弃返回 id，
+       * 用户切到无会话的新目录后对话区仍停留在旧目录的会话 */
+      (D(!1),
+        pickDir({ title: "选择项目目录" })
           .then((n) => {
             if (!n) return;
-            (C(n), D(!1));
-            const f = (h || []).find((d) => d.path === n);
-            if (f) {
-              a.connectWorkspace(f.workspaceId);
-              return;
-            }
-            return a
-              .create({ path: n })
-              .then((d) => a.connectWorkspace(d.workspaceId));
+            (C(n), _e(n));
           })
-          .catch(() => {});
+          .catch(() => {}));
     },
     xe = (n) => {
-      const f = Y.filter(n).sort(
+      /* 1.20.2：跳过 blank 会话——「＋ 新建」留下的空会话 updatedAt 必然最新，
+       * 不跳过则每次切项目都落进空会话，表现为「路径切了、会话没切过去」；
+       * 真想要空会话时 _e 兜底的 connectWorkspace 会复用项目里的 blank，不会重复建。 */
+      const f = Y.filter((d) => !m[d].blank && n(d)).sort(
         (d, W) => (m[W].updatedAt || 0) - (m[d].updatedAt || 0),
       )[0];
-      f && o && o.open(f);
+      /* 评审修复：返回是否命中，无匹配会话时调用方落到 _e 连接目标工作区 */
+      if (!f || !o) return false;
+      o.open(f);
+      return true;
     },
     $e = (n) => {
-      (C(n), D(!1), z(""), xe((f) => ee(m[f].cwd) === n));
+      (C(n), D(!1), z(""));
+      /* 评审修复：切到无会话的项目兜底连接其工作区（对齐“新建”），否则对话区停留旧会话 */
+      xe((f) => ee(m[f].cwd) === n) || _e(n);
     },
     Ge = (n) => {
-      (C(n), _(!1), V(""), N(""), F(!1), xe((f) => m[f].cwd === n));
+      (C(n), _(!1), V(""), N(""), F(!1));
+      /* 评审修复：见 $e——worktree 无会话同样兜底连接 */
+      xe((f) => m[f].cwd === n) || _e(n);
     },
     Ce = () => {
       !se.trim() ||
@@ -295,24 +351,30 @@ function Sidebar(t) {
       e(
         "div",
         { className: "pw-drop-list" },
-        je.map((n) =>
-          dropRowEl({
+        je.map((n) => {
+          const isCur = canonPath(n.root) === canonPath(M);
+          return dropRowEl({
             k: n.root,
-            cur: canonPath(n.root) === canonPath(M),
+            cur: isCur,
             title: n.root,
             onClick: () => $e(n.root),
             label: shortenPath(n.root),
-            /* 活动徽标经 extra 注入（数组子节点补 key，原为静态子参数无需 key） */
-            extra: [
-              n.running > 0
-                ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
-                : null,
-              n.pending > 0
-                ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
-                : null,
-            ],
-          }),
-        ),
+            /* 活动徽标经 extra 注入；当前项目不重复显示（其会话已平铺在下方列表） */
+            extra: isCur
+              ? null
+              : [
+                  n.running > 0
+                    ? e("span", { key: "r", className: "pw-act run" }, "● " + n.running)
+                    : null,
+                  n.pending > 0
+                    ? e("span", { key: "w", className: "pw-act warn" }, "● " + n.pending)
+                    : null,
+                  n.done > 0
+                    ? e("span", { key: "d", className: "pw-act done" }, "● " + n.done)
+                    : null,
+                ],
+          });
+        }),
         je.length === 0
           ? e("div", { className: "pw-hint" }, "没有匹配的项目")
           : null,
@@ -500,7 +562,6 @@ function Sidebar(t) {
         onTab: (n) => filesTabStore.set(n),
         onPickNotes: pickNotesDir,
         layout: s,
-        workspaces: a,
         open: pe,
         onToggle: ke,
         sessionId: k,
@@ -509,7 +570,7 @@ function Sidebar(t) {
             ? (n) =>
                 t.mentionBridge.mention(
                   k,
-                  mentionPath(n.path, n.type === "directory"),
+                  mentionRef(n.path, n.type === "directory"),
                 )
             : void 0,
         onMentionAbs:
@@ -517,7 +578,7 @@ function Sidebar(t) {
             ? (n) =>
                 t.mentionBridge.mention(
                   k,
-                  "@" + n.path + (n.type === "directory" ? "/ " : " "),
+                  mentionRef(n.path, n.type === "directory", { abs: true }),
                 )
             : void 0,
       }),
@@ -538,17 +599,6 @@ function Sidebar(t) {
             onClick: () => _e(p),
           },
           "＋ 新建",
-        ),
-        e(
-          "button",
-          {
-            className:
-              "pw-icon-btn" + (Pe ? " spin" : "") + (Ne ? " flash" : ""),
-            title: "刷新",
-            onClick: Te,
-          },
-          RefreshIcon(14),
-          Ne ? flashEl(14) : null,
         ),
         e(
           "button",
@@ -578,27 +628,34 @@ function Sidebar(t) {
             /* LRM 前缀：RTL 截断下保住 ~/ 等前导中性字符的显示顺序 */
             M ? "\u200e" + shortenPath(M) : "选择项目…",
           ),
-          aRun + aPend > 0
+          oRun + oPend + oDone > 0
             ? e(
                 "span",
                 {
                   className: "pw-act-badge",
                   title:
-                    "进行中 " +
-                    aRun +
+                    "其他项目：进行中 " +
+                    oRun +
                     " · 待交互 " +
-                    aPend +
-                    "（其中当前工作区：进行中 " +
+                    oPend +
+                    " · 已完成未看 " +
+                    oDone +
+                    "（当前项目：进行中 " +
                     cRun +
                     " · 待交互 " +
                     cPend +
+                    " · 已完成未看 " +
+                    cDone +
                     "）",
                 },
-                aRun > 0
-                  ? e("span", { className: "pw-act run" }, "● " + aRun)
+                oRun > 0
+                  ? e("span", { className: "pw-act run" }, "● " + oRun)
                   : null,
-                aPend > 0
-                  ? e("span", { className: "pw-act warn" }, "● " + aPend)
+                oPend > 0
+                  ? e("span", { className: "pw-act warn" }, "● " + oPend)
+                  : null,
+                oDone > 0
+                  ? e("span", { className: "pw-act done" }, "● " + oDone)
                   : null,
               )
             : null,

@@ -55,7 +55,7 @@ const mockStreamRes = () => {
 
 /* ---------- client 纯组件无头测试：fakeReact 把 createElement 收成结构对象，
  * 直接 eval parts/workbench 里的纯声明段（无 import 的 client 源码因此可测） ---------- */
-/* hooks 为无状态实现；UI 无头驱动经 uiStateQueue 预设 useState 返回序列（如 BottomPanel 的 rect 注入）。
+/* hooks 为无状态实现；UI 无头驱动经 uiStateQueue 预设 useState 返回序列（下方各 UI 块按需注入）。
  * useEffect 记录进 uiEffects 供按需手动执行（Details 焦点刷新闭包用例需要真跑 effect 注册监听）。
  * useRef 按位置池化 + __resetRefs 按渲染复位——真 React 同一组件跨渲染返回同一 ref 对象，
  * 否则 edRef 类"跨渲染持引用"模式无法被忠实模拟（修复验证会假失败）。 */
@@ -66,9 +66,13 @@ let uiRefPos = 0
 const fakeReact = {
   createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
   Fragment: 'Fragment',
+  /* 10-panels 的 PanelErrorBoundary extends React.Component——无头测试只声明不实例化，空类垫片即可 */
+  Component: class {},
   useState: (init) => (uiStateQueue && uiStateQueue.length ? [uiStateQueue.shift(), () => {}] : [init, () => {}]),
   useEffect: (fn) => { uiEffects.push(fn) },
   useRef: (v) => { const i = uiRefPos++; return uiRefPool[i] || (uiRefPool[i] = { current: v || null }) },
+  useMemo: (fn) => fn(),
+  useCallback: (fn) => fn(),
   __resetRefs: () => { uiRefPos = 0 },
 }
 const loadPart = (files, names) => {
@@ -105,11 +109,6 @@ try {
   const resCss = mockRes()
   await routes['GET /wb/style.css']({ res: resCss })
   ok('style.css 直出', resCss.code === 200 && String(resCss.body).includes('.pw-sidebar'))
-
-  /* xterm vendor 直出（1.19.8 起从 bundle 剥离，首开终端按需注入） */
-  const resVx = mockRes()
-  await routes['GET /wb/vendor-xterm.js']({ res: resVx })
-  ok('vendor-xterm.js 直出', resVx.code === 200 && String(resVx.body).includes('__pwXterm'))
 
   const l1 = await routes['POST /wb/listDir']({ body: { path: dir } })
   ok('listDir(fs 主路)', Array.isArray(l1.entries)
@@ -189,6 +188,86 @@ try {
   const pg2 = await prefRoutes['POST /wb/prefsGet']({ body: {} })
   ok('prefsGet 自定义目录失效自愈合回落桌面', pg2.custom === false && pg2.pickerDir !== goneDir)
 
+  /* ---------- 便签（quick notes）：qn* 路由组回归防线 ----------
+   * quickNotesDir 与 qnPrefsFile 均注入临时路径，零触碰真实用户数据。 */
+  const qnDirTmp = join(dir, 'qntemp')
+  const qnPrefsTmp = join(dir, 'qnprefs.json')
+  const qnRoutes = workbenchApi({ get: (n) => (n === 'shell' ? shellShim : n === 'fs' ? fsShim : undefined) }, {
+    quickNotesDir: qnDirTmp,
+    qnPrefsFile: qnPrefsTmp,
+  })
+
+  /* qnState */
+  const qs0 = await qnRoutes['POST /wb/qnState']({ body: {} })
+  ok('qnState 初始态（临时目录 + 默认开启划选）', qs0.ok === true && qs0.dir === qnDirTmp && qs0.custom === false && qs0.capture === true)
+
+  /* qnCreate */
+  const qc1 = await qnRoutes['POST /wb/qnCreate']({ body: { title: '测试便签', content: '# 测试标题\n这是第一条便签正文。' } })
+  ok('qnCreate 创建便签', qc1.ok === true && qc1.name === '测试便签.md' && qc1.title === '测试便签')
+  ok('qnCreate 磁盘写入验证', readFileSync(join(qnDirTmp, '测试便签.md'), 'utf8').includes('这是第一条便签正文'))
+
+  /* qnCreate 重名序号去重 */
+  const qc2 = await qnRoutes['POST /wb/qnCreate']({ body: { title: '测试便签', content: '第二篇同名便签' } })
+  ok('qnCreate 重名自增后缀', qc2.ok === true && qc2.name === '测试便签-2.md')
+
+  /* qnCreate 拒绝空内容 */
+  ok('qnCreate 拒空内容（400）', (await thrownStatus(() => qnRoutes['POST /wb/qnCreate']({ body: { title: 'x', content: '   ' } }))) === 400)
+
+  /* qnList 与检索 */
+  const qlAll = await qnRoutes['POST /wb/qnList']({ body: {} })
+  ok('qnList 列表返回两条', qlAll.ok === true && Array.isArray(qlAll.notes) && qlAll.notes.length === 2)
+  ok('qnList 预览提取非空首行', qlAll.notes.some((n) => n.name === '测试便签.md' && n.preview === '测试标题'))
+  const qlFilter = await qnRoutes['POST /wb/qnList']({ body: { q: '第二篇' } })
+  ok('qnList 全文检索过滤命中', qlFilter.notes.length === 1 && qlFilter.notes[0].name === '测试便签-2.md')
+
+  /* qnRead */
+  const qr = await qnRoutes['POST /wb/qnRead']({ body: { name: '测试便签.md' } })
+  ok('qnRead 读回文本', qr.ok === true && qr.text.includes('这是第一条便签正文'))
+  ok('qnRead 拒非法路径名（400）', (await thrownStatus(() => qnRoutes['POST /wb/qnRead']({ body: { name: '../wbprefs.json' } }))) === 400)
+  ok('qnRead 查无此便签（404）', (await thrownStatus(() => qnRoutes['POST /wb/qnRead']({ body: { name: 'notfound.md' } }))) === 404)
+
+  /* qnUpdate 内容与重命名 */
+  const qu = await qnRoutes['POST /wb/qnUpdate']({ body: { name: '测试便签.md', content: '更新后的文本', title: '改名后的便签' } })
+  ok('qnUpdate 改内容并改名', qu.ok === true && qu.name === '改名后的便签.md' && qu.renamed === true)
+  ok('qnUpdate 磁盘改名落盘', existsSync(join(qnDirTmp, '改名后的便签.md')) && !existsSync(join(qnDirTmp, '测试便签.md')))
+  ok('qnUpdate 拒空内容（400）', (await thrownStatus(() => qnRoutes['POST /wb/qnUpdate']({ body: { name: '改名后的便签.md', content: ' ' } }))) === 400)
+
+  /* qnDelete */
+  ok('qnDelete 拒非法文件名（400）', (await thrownStatus(() => qnRoutes['POST /wb/qnDelete']({ body: { name: 'bad/name.md' } }))) === 400)
+  ok('qnDelete 查无此便签（404）', (await thrownStatus(() => qnRoutes['POST /wb/qnDelete']({ body: { name: 'ghost.md' } }))) === 404)
+
+  /* qnSetDir */
+  const qdCustom = join(dir, 'custom-qn')
+  mkdirSync(qdCustom)
+  const qdSet = await qnRoutes['POST /wb/qnSetDir']({ body: { dir: qdCustom } })
+  ok('qnSetDir 切换自定义目录', qdSet.ok === true && qdSet.dir === qdCustom && qdSet.custom === true)
+  const qdBad = await qnRoutes['POST /wb/qnSetDir']({ body: { dir: 'relative' } })
+  ok('qnSetDir 拒相对路径', qdBad.ok === false)
+  const qdClear = await qnRoutes['POST /wb/qnSetDir']({ body: { dir: '' } })
+  ok('qnSetDir 空串恢复默认', qdClear.ok === true && qdClear.dir === qnDirTmp && qdClear.custom === false)
+
+  /* qnMoveToKb 权限防御 */
+  ok('qnMoveToKb 拒未登记知识库目录', (await qnRoutes['POST /wb/qnMoveToKb']({ body: { name: '改名后的便签.md', targetDir: '/tmp' } })).ok === false)
+
+  /* qnMoveToProject 验证 */
+  const moveProjRes = await qnRoutes['POST /wb/qnMoveToProject']({ body: { name: '改名后的便签.md', targetDir: dir } })
+  ok('qnMoveToProject 分流至项目目录', moveProjRes.ok === true && existsSync(join(dir, '改名后的便签.md')))
+
+  /* qnSyncTo 验证（纯复制，不删源便签） */
+  const syncRes = await qnRoutes['POST /wb/qnSyncTo']({ body: { name: '测试便签-2.md', targetDir: dir } })
+  ok('qnSyncTo 同步到指定目录且保留源便签', syncRes.ok === true && existsSync(join(dir, '测试便签-2.md')) && existsSync(join(qnDirTmp, '测试便签-2.md')))
+
+  /* qnFoldersGet / qnFoldersSet 目录元数据 */
+  const fSet = await qnRoutes['POST /wb/qnFoldersSet']({
+    body: {
+      folders: ['工作', '生活'],
+      noteFolders: { '测试便签-2.md': '工作' },
+    },
+  })
+  ok('qnFoldersSet 写入目录元数据', fSet.ok === true && fSet.folders.length === 2 && fSet.noteFolders['测试便签-2.md'] === '工作')
+  const fGet = await qnRoutes['POST /wb/qnFoldersGet']({})
+  ok('qnFoldersGet 读回目录元数据', fGet.ok === true && fGet.folders[0] === '工作' && fGet.noteFolders['测试便签-2.md'] === '工作')
+
   /* 删除：文件进 ~/.Trash，断言后清理测试残留。
    * macOS TCC 下终端可能无权读 ~/.Trash（EPERM）——环境权限问题不应砸掉整个
    * 冒烟套件：读不到废纸篓就只断言删除本身，跳过落点验证。 */
@@ -208,6 +287,37 @@ try {
     : null
   ok('delete 移废纸篓' + (trashReadable ? '' : '（废纸篓不可读，仅断言删除）'), dl.ok === true && gone && (trashReadable ? !!landed : true))
   if (landed) rmSync(join(trashDir, landed), { recursive: true, force: true })
+
+  /* ---------- 移动（拖拽把文件/文件夹挪进另一目录）---------- */
+  mkdirSync(join(dir, 'sub2'))
+  const mvFileSrc = join(dir, 'move-me.txt')
+  writeFileSync(mvFileSrc, 'move me', 'utf8')
+  const mvRes = await routes['POST /wb/move']({ body: { src: mvFileSrc, destDir: join(dir, 'sub') } })
+  ok('move 文件入目录', mvRes.ok === true && !existsSync(mvFileSrc) && existsSync(join(dir, 'sub', 'move-me.txt')) && readFileSync(join(dir, 'sub', 'move-me.txt'), 'utf8') === 'move me')
+
+  /* 文件夹整体移动（含子文件，cp/rm 兜底语义同 delete） */
+  mkdirSync(join(dir, 'mv-dir'))
+  writeFileSync(join(dir, 'mv-dir', 'inner.txt'), 'inner', 'utf8')
+  const mvDirRes = await routes['POST /wb/move']({ body: { src: join(dir, 'mv-dir'), destDir: join(dir, 'sub2') } })
+  ok('move 文件夹整体移动', mvDirRes.ok === true && !existsSync(join(dir, 'mv-dir')) && existsSync(join(dir, 'sub2', 'mv-dir', 'inner.txt')))
+
+  /* 防御：拒绝移进自身子孙；同父目录 no-op；非法参数 400 */
+  mkdirSync(join(dir, 'sub', 'subsub'))
+  const mvSelf = await routes['POST /wb/move']({ body: { src: join(dir, 'sub'), destDir: join(dir, 'sub', 'subsub') } })
+  ok('move 拒绝移入自身子孙', mvSelf.ok === false)
+  const mvNoop = await routes['POST /wb/move']({ body: { src: join(dir, 'sub', 'move-me.txt'), destDir: join(dir, 'sub') } })
+  ok('move 同父目录 no-op', mvNoop.ok === false)
+  ok('move 拒相对 src（400）', (await thrownStatus(() => routes['POST /wb/move']({ body: { src: 'rel/x.txt', destDir: join(dir, 'sub') } }))) === 400)
+  ok('move 拒相对 destDir（400）', (await thrownStatus(() => routes['POST /wb/move']({ body: { src: join(dir, 'sub', 'move-me.txt'), destDir: 'rel' } }))) === 400)
+
+  /* ---------- 会话路径（对齐 dsh 会话持久化布局） ---------- */
+  ok('sessionPath 拒空 id（400）', (await thrownStatus(() => routes['POST /wb/sessionPath']({ body: {} }))) === 400)
+  const spPath = await routes['POST /wb/sessionPath']({ body: { id: 'session-smoke-xyz', cwd: dir } })
+  const spPathParent = spPath.path.slice(0, spPath.path.lastIndexOf('/'))
+  const spPathProj = spPathParent.slice(spPathParent.lastIndexOf('/') + 1)
+  ok('sessionPath 绝对路径 + 项目桶 + 会话目录', spPath.ok === true && spPath.path.endsWith('/session-smoke-xyz') && spPathParent.includes('sessions') && spPathProj.startsWith('--') && spPathProj.endsWith('--'))
+  const spPathNC = await routes['POST /wb/sessionPath']({ body: { id: 'session-smoke-nc' } })
+  ok('sessionPath 无 cwd 归 _no-cwd 桶', spPathNC.ok === true && spPathNC.path.endsWith('/_no-cwd/session-smoke-nc'))
 
   /* ---------- skills ---------- */
   const sl = await routes['GET /skills/list']({ query: new URLSearchParams('cwd=') })
@@ -233,54 +343,6 @@ try {
   try { await routes['POST /skills/toggle']({ body: { filePath: outsideMd, disable: true } }) } catch (e) { denied = e && e.status === 403 }
   ok('skills/toggle 白名单外拒绝（403）', denied && !readFileSync(outsideMd, 'utf8').includes('disable-model-invocation'))
 
-  /* ---------- terminal pty 端到端：spawn → 写入标记 → transcript 命中 → 回收 ----------
-   * 标记用算术展开（$((100+23))）而非 $?：无头/临时 HOME 环境下登录 shell 启动
-   * 命令可能非零退出（实测 zsh/bash 均如此），$? 探针会假失败；算术展开的输出
-   * 与键入文本不同形，仍能证明"命令真被执行了" */
-  try {
-    const { createTerminalManager } = await import(new URL('../lib/host/terminal.js', import.meta.url))
-    const mgr = createTerminalManager(2)
-    const h = mgr.open('smoke-sess', 't1', dir, 80, 24)
-    h.pty.write('echo smoke-pty-$((100+23))\n')
-    let hit = false
-    for (let i = 0; i < 80 && !hit; i++) {
-      if (h.transcript.includes('smoke-pty-123')) hit = true
-      else await new Promise((r) => setTimeout(r, 100))
-    }
-    mgr.disposeAll()
-    ok('terminal pty 往返', hit)
-  } catch (e) {
-    ok('terminal pty 往返', false, String(e && e.message ? e.message : e))
-  }
-
-  /* 全局 PTY 总上限（评审修复回归防线）：per-session 配额按客户端自报 sessionId
-   * 计数可被随机 sessionId 绕过；maxTotal=3 时第 4 个不同会话必须被拒 */
-  try {
-    const { createTerminalManager } = await import(new URL('../lib/host/terminal.js', import.meta.url))
-    const mgr2 = createTerminalManager(2, 3)
-    mgr2.open('gs1', 't1', dir, 80, 24)
-    mgr2.open('gs2', 't1', dir, 80, 24)
-    mgr2.open('gs3', 't1', dir, 80, 24)
-    let rejected = false
-    try {
-      mgr2.open('gs4', 't1', dir, 80, 24)
-    } catch (e) {
-      rejected = /global limit/.test(String((e && e.message) || e))
-    }
-    mgr2.disposeAll()
-    ok('terminal 全局总上限拒绝超额', rejected)
-  } catch (e) {
-    ok('terminal 全局总上限拒绝超额', false, String(e && e.message ? e.message : e))
-  }
-
-  /* 共享宿主解析模块（评审修复：host 各模块的 makeRequire 收敛到 host-require.js） */
-  try {
-    const { makeRequire } = await import(new URL('../lib/host/host-require.js', import.meta.url))
-    const wsmod = makeRequire()('ws')
-    ok('host-require 解析 ws', !!(wsmod && wsmod.WebSocketServer))
-  } catch (e) {
-    ok('host-require 解析 ws', false, String(e && e.message ? e.message : e))
-  }
 
   /* ---------- client 纯组件（无头渲染） ---------- */
   /* 01-stores 提供 pathJoinFor/baseName 等路径工具（12-mdpath 依赖）；该文件本就按
@@ -306,7 +368,7 @@ try {
   /* CSS 守卫：.pw-tab-x 被预览栏与底部面板共用，任何"裸类名 + opacity:0"规则都会把预览 tab 的 × 永久藏掉（实战踩过） */
   const cssText = readFileSync(new URL('../lib/style.css', import.meta.url), 'utf8')
   ok('css 无裸 .pw-tab-x 隐藏规则', !/^\.pw-tab-x\s*\{[^}]*opacity\s*:\s*0/m.test(cssText))
-  ok('css 无 ACP 残留且多终端 pane 样式就位', cssText.indexOf('pw-acp') < 0 && cssText.indexOf('.pw-term-pane') >= 0 && cssText.indexOf('.pw-term-pane.off') >= 0)
+  ok('css 无 ACP/终端残留', cssText.indexOf('pw-acp') < 0 && cssText.indexOf('pw-term') < 0 && cssText.indexOf('.pw-bpanel') < 0 && cssText.indexOf('.xterm') < 0)
 
   /* store 工厂行为等价（③ 重构的唯一直接证明）：fire 语义与"不变不刷"规则 */
   const S = new Function('React', readFileSync(new URL('./workbench/01-stores.js', import.meta.url), 'utf8') + '\nreturn { bus, viewStore, notesStore, filesTabStore, store }')(fakeReact)
@@ -328,9 +390,8 @@ try {
   S.store.bucket('cap51')
   ok('store 桶 LRU 触及提新', Object.keys(S.store.buckets).length === 50 && !!S.store.buckets.cap2 && !S.store.buckets.cap3)
 
-  const I5 = loadPart(['05-icons.js', '14-footicons.js'], ['LayersIcon', 'TerminalIcon'])
-  ok('LayersIcon/TerminalIcon 结构', findAll(I5.LayersIcon(12), (n) => n.type === 'path').length === 3
-    && findAll(I5.TerminalIcon(12), (n) => n.type === 'polyline').length === 1 && findAll(I5.TerminalIcon(12), (n) => n.type === 'line').length === 1)
+  const I5 = loadPart(['05-icons.js', '14-footicons.js'], ['LayersIcon'])
+  ok('LayersIcon 结构', findAll(I5.LayersIcon(12), (n) => n.type === 'path').length === 3)
 
   /* 共享 helper（评审修复 #6 收敛物）：下拉三件套结构 + 两击确认状态机 */
   const H6 = loadPart(['06-misc.js'], ['useTwoClick', 'dropOverlayEl', 'dropFilterEl', 'dropRowEl'])
@@ -346,6 +407,93 @@ try {
    *（PencilIcon 刻意未收敛：skills 版 11px 固定 vs workbench 13px，见 05-icons 注释） */
   const skillsSrc = readFileSync(new URL('./skills.js', import.meta.url), 'utf8')
   ok('ui skills.js 仍提供共享 shortenPath', /function shortenPath\(/.test(skillsSrc))
+
+  /* ---------- chat 文件点击接管（15-deliv，v1.21.1–）路径解析 ----------
+   * v1.22.0 起产物面板与事件窗口订阅整体移除，只保留点击接管；此处单测路径反解。 */
+  {
+    const D9 = loadPart(['01-stores.js', '03-tree.js', '06-misc.js', '12-mdpath.js', '15-deliv.js'], ['delivAbsPath'])
+    ok('deliv 相对路径按 cwd 解析', D9.delivAbsPath('/ws', 'r/a.md') === '/ws/r/a.md' && D9.delivAbsPath('/ws', '/abs/a.md') === '/abs/a.md' && D9.delivAbsPath(null, 'r/a.md') === 'r/a.md' && D9.delivAbsPath('/ws', '~/x.md') === '~/x.md')
+  }
+
+  /* ---------- chat 产出文件 chip / 工具卡文件链接 点击接管（v1.21.1–）----------
+   * 平台 openFile 走 openWorkspacePath（系统默认应用外部打开）；document capture
+   * 拦普通左键改道应用内预览。覆盖：产出 chip（title=完整路径）+ 工具卡 fileLink
+   * 按钮（文本=摘要路径，反解按 sessionCwd；~ 摘要放行）；修饰键/「显示文件夹」/
+   * 已处理事件放行，重装幂等。 */
+  {
+    const hookSrc = ['01-stores.js', '03-tree.js', '06-misc.js', '12-mdpath.js', '15-deliv.js']
+      .map((f) => readFileSync(new URL('./workbench/' + f, import.meta.url), 'utf8'))
+      .join('\n')
+    const docL = []
+    const fakeWin3 = { addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }
+    const fakeDoc3 = {
+      addEventListener: (t2, f, cap) => docL.push([t2, f, cap]),
+      removeEventListener: (t2, f) => {
+        const i = docL.findIndex((x) => x[1] === f)
+        i >= 0 && docL.splice(i, 1)
+      },
+    }
+    const HK = new Function('React', 'API', 'window', 'document', hookSrc + '\nreturn { sessionProbe, sessionCwd, store, installDelivChipHook }')(
+      fakeReact, '/__dsh-geek-sidebar__', fakeWin3, fakeDoc3,
+    )
+    HK.installDelivChipHook()
+    ok('chip 接管 capture 监听已装', docL.length === 1 && docL[0][0] === 'click' && docL[0][2] === true)
+    HK.installDelivChipHook()
+    ok('chip 接管重装幂等（HMR 摘旧闭包）', docL.length === 1)
+    HK.sessionProbe.set('ck1')
+    HK.sessionCwd.sid = 'ck1'
+    HK.sessionCwd.cwd = '/ws'
+    const CHIP_SEL = 'div[data-produced-files-row] button[title]'
+    const LINK_SEL = 'div[data-variant] [class*="fileLink"]'
+    /* hit: {chip: title路径} 或 {link: 摘要文本} 或 {}（不命中任何选择器） */
+    const mkEv = (hit, mods) => ({
+      button: 0, defaultPrevented: false,
+      metaKey: !!(mods && mods.meta), ctrlKey: !!(mods && mods.ctrl), shiftKey: !!(mods && mods.shift), altKey: false,
+      target: {
+        closest: (s) => {
+          if (s === CHIP_SEL) return hit.chip !== undefined ? { getAttribute: (k) => (k === 'title' ? hit.chip : null) } : null
+          if (s === LINK_SEL) return hit.link !== undefined ? { textContent: hit.link } : null
+          return null
+        },
+      },
+      pd: false, sp: false,
+      preventDefault() { this.pd = true },
+      stopPropagation() { this.sp = true },
+    })
+    const h = docL[0][1]
+    const e1 = mkEv({ chip: 'out/r.md' })
+    h(e1)
+    ok('chip 普通左键拦截改道应用内预览', e1.pd && e1.sp && HK.store.bucket('ck1').active === '/ws/out/r.md')
+    const e2 = mkEv({ chip: 'out/r.md' }, { meta: true })
+    h(e2)
+    ok('chip 修饰键点击放行系统打开', !e2.pd && !e2.sp)
+    const e3 = mkEv({ chip: '.' })
+    h(e3)
+    ok('chip 「显示文件夹」(title=.) 放行外部', !e3.pd && !e3.sp)
+    const e3b = mkEv({ chip: '~/x/y.md' })
+    h(e3b)
+    ok('chip ~ 路径放行外部（与工具卡链接同规）', !e3b.pd && !e3b.sp)
+    const e4 = mkEv({ chip: 'x.md' })
+    e4.defaultPrevented = true
+    h(e4)
+    ok('chip 已被先行处理的事件放行', !e4.pd && !e4.sp)
+    const e5 = mkEv({ chip: null })
+    h(e5)
+    ok('chip 无 title 路径不拦', !e5.pd && !e5.sp)
+    const e6 = { button: 2, defaultPrevented: false, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, target: { closest: () => ({ getAttribute: () => 'y.md', textContent: 'y.md' }) }, pd: false, preventDefault() { this.pd = true }, stopPropagation() { this.sp = true } }
+    h(e6)
+    ok('chip 非左键不拦', !e6.pd && !e6.sp)
+    /* 工具卡文件链接（read/write/edit 行摘要按钮，v1.21.2） */
+    const e7 = mkEv({ link: ' parts/src/a.ts ' })
+    h(e7)
+    ok('工具卡文件链接拦截改道预览（摘要文本反解按 cwd）', e7.pd && e7.sp && HK.store.bucket('ck1').active === '/ws/parts/src/a.ts')
+    const e8 = mkEv({ link: '~/notes/x.md' })
+    h(e8)
+    ok('工具卡 ~ 摘要放行外部（客户端无宿主 home 不反解）', !e8.pd && !e8.sp)
+    const e9 = mkEv({})
+    h(e9)
+    ok('非文件点击不拦', !e9.pd && !e9.sp)
+  }
 
   /* ---------- DirPicker 无头驱动（1.19.11：三处路径选择统一的应用内目录选择模态） ----------
    * 纯状态机 store + Promise 桥（签名对齐平台 pickDirectory）；组件随 bus 重渲染。
@@ -459,90 +607,38 @@ try {
     }
   }
   ok('css DirPicker 样式就位', cssText.indexOf('.pw-dpk-panel') >= 0 && cssText.indexOf('.pw-dpk-ok') >= 0 && cssText.indexOf('.pw-dpk-star') >= 0)
+  ok('css 便签样式就位', cssText.indexOf('.pw-qn-bubble') >= 0 && cssText.indexOf('.pw-qn-drawer') >= 0 && cssText.indexOf('.pw-qn-side-item') >= 0)
 
-  /* ---------- 终端面板 UI 无头驱动：FootBar/termTabs/BottomPanel 渲染期回归防线 ----------
+  /* ---------- FootBar/store/便签 UI 无头驱动：渲染期回归防线 ----------
    * node --check 只查语法，必须用 fakeReact 真渲染一遍。 */
   {
-    class FakeWS {
-      constructor(url) { this.url = url; this.readyState = 1; this.sent = [] }
-      send() {}
-      close() {}
-    }
-    const uiSrc = ['00-header.js', '01-stores.js', '06-misc.js', '05-icons.js', '14-footicons.js', '04-footbar.js', '15-termtabs.js', '15-bottom-panel.js', '15-dirpicker.js']
+    const uiSrc = ['00-header.js', '01-stores.js', '06-misc.js', '05-icons.js', '14-footicons.js', '15-quicknotes.js', '04-footbar.js']
       .map((f) => readFileSync(new URL('./workbench/' + f, import.meta.url), 'utf8'))
       .join('\n')
-    /* window 桩：tab 持久化（pw-term-tabs）可断言；eval 时存储为空 → 自动恢复零副作用 */
-    const lsStore = {
-      _m: {},
-      getItem(k) { return k in this._m ? this._m[k] : null },
-      setItem(k, v) { this._m[k] = String(v) },
-      removeItem(k) { delete this._m[k] },
-    }
-    const UI = new Function('React', 'location', 'WebSocket', 'window', uiSrc + '\nreturn { FootBar, BottomPanel, termTabs, termTabsRestore, bottomPanel, bottomArea, store }')(
+    const UI = new Function('React', 'host', uiSrc + '\nreturn { FootBar, store, qnStore, qnSummarize }')(
       fakeReact,
-      { origin: 'http://127.0.0.1:3080', protocol: 'http:' },
-      FakeWS,
-      { localStorage: lsStore },
+      { call: () => Promise.resolve({ ok: true }) },
     )
     let uiErr = ''
     try {
       const fb = UI.FootBar({ wide: true, onSkills() {} })
-      ok('ui FootBar 渲染（技能/终端两钮）', findAll(fb, (n) => n.type === 'button').length === 2)
-      ok('ui FootBar 终端钮（无聚合徽标）',
-        findAll(fb, (n) => n.children && n.children[n.children.length - 1] === '终端').length === 1
-        && findAll(fb, (n) => String(n.props && n.props.className).indexOf('pw-foot-badge') >= 0).length === 0)
+      ok('ui FootBar 渲染（技能/便签两钮）', findAll(fb, (n) => n.type === 'button').length === 2)
+      ok('ui FootBar 便签钮', findAll(fb, (n) => n.children && n.children[n.children.length - 1] === '便签').length === 1)
       /* store.open：重复打开同一文件也必须激活对应 tab（评审 P2 回归防线） */
       UI.store.open('s1', { path: '/a.md', name: 'a.md' })
       UI.store.open('s1', { path: '/b.md', name: 'b.md' })
       UI.store.open('s1', { path: '/a.md', name: 'a.md' })
       const bk = UI.store.bucket('s1')
       ok('ui store.open 重复打开激活既有 tab', bk.files.length === 2 && bk.active === '/a.md')
-      /* ＋ 选目录建解绑 tab：自动展开面板、持久化 {id,cwd} */
-      const tabId = UI.termTabs.add('/tmp/term-a')
-      ok('ui ＋选目录建 tab 并自动展开面板', UI.termTabs.tabs.length === 1 && UI.bottomPanel.open === true && UI.bottomPanel.tab === tabId)
-      ok('ui tab 列表持久化（pw-term-tabs）', (lsStore._m['pw-term-tabs'] || '').indexOf('/tmp/term-a') >= 0)
-      /* BottomPanel 四个 useState 依序：force/rect/mounted/entered——队列后两位
-       * 置 true 模拟「已打开并完成滑入」的稳态（effect 驱动的首帧过渡不在此测） */
-      uiStateQueue = [0, { left: 0, width: 900 }, true, true]
-      const bp = UI.BottomPanel()
-      const bpTabs = findAll(bp, (n) => /(^| )pw-bpanel-tab( |$)/.test(String(n.props && n.props.className)))
-      ok('ui BottomPanel tab 栏（默认终端+解绑 tab）', bpTabs.length === 2)
-      /* tab 序：默认「终端」居左（锁定无 ×），解绑 tabs 随后（带 ×） */
-      ok('ui tab 序：默认终端居左', String(bpTabs[0].children[0]) === '终端' && findAll(bpTabs[0], (n) => String(n.props && n.props.className) === 'pw-tab-x').length === 0)
-      ok('ui 解绑 tab 带关闭 ×', findAll(bp, (n) => String(n.props && n.props.className) === 'pw-tab-x').length === 1)
-      ok('ui ＋号接入钮', findAll(bp, (n) => String(n.props && n.props.className) === 'pw-bpanel-add').length === 1)
-      ok('ui 关闭钮为 » 旋转箭头', findAll(bp, (n) => String(n.props && n.props.className).includes('pw-bpanel-col-arrow')).length === 1)
-      /* 常驻挂载 + 惰性首活：只渲染激活过的 pane（当前 tab = 新建的解绑 tab） */
-      let panes = findAll(bp, (n) => /(^| )pw-term-pane( |$)/.test(String(n.props && n.props.className)))
-      ok('ui 惰性首活：仅当前 tab 的 pane 进场', panes.length === 1 && !/ off/.test(String(panes[0].props.className)))
-      /* 切回默认终端：两个 pane 常驻，解绑 pane off 隐藏（不卸载保活） */
-      UI.bottomPanel.set({ tab: 'terminal' })
-      uiStateQueue = [0, { left: 0, width: 900 }, true, true]
-      const bp2 = UI.BottomPanel()
-      panes = findAll(bp2, (n) => /(^| )pw-term-pane( |$)/.test(String(n.props && n.props.className)))
-      ok('ui 切 tab 双 pane 常驻（一切一隐）', panes.length === 2 && findAll(bp2, (n) => /pw-term-pane off/.test(String(n.props && n.props.className))).length === 1)
-      /* 关 tab 回收：tab 退回默认终端、持久化清空 */
-      UI.termTabs.close(tabId)
-      ok('ui 关闭 tab 退回默认终端', UI.termTabs.tabs.length === 0 && UI.bottomPanel.tab === 'terminal')
-      ok('ui 关闭后持久化清空', lsStore._m['pw-term-tabs'] === '[]')
-      /* 刷新恢复：种子 → termTabsRestore 重建 tab 元信息（沿用原 id，不抢建 pty）；重复恢复幂等 */
-      lsStore._m['pw-term-tabs'] = JSON.stringify([{ id: 'trest1', cwd: '/tmp/term-r' }])
-      UI.termTabsRestore()
-      ok('ui 刷新恢复重建 tab（沿用原 id）', UI.termTabs.tabs.length === 1 && UI.termTabs.tabs[0].id === 'trest1' && UI.termTabs.tabs[0].cwd === '/tmp/term-r')
-      UI.termTabsRestore()
-      ok('ui 恢复幂等（不重复建 tab）', UI.termTabs.tabs.length === 1)
-      UI.termTabs.close('trest1')
-      /* 关栏语义：常驻挂载 + off 类滑出，不再 render null（终端保活） */
-      UI.bottomPanel.open = false
-      uiStateQueue = [0, { left: 0, width: 900 }, true, true]
-      const bpOff = UI.BottomPanel()
-      ok('ui 面板关闭渲染 off 态', bpOff !== null && /pw-bpanel off/.test(String(bpOff.props.className)))
-      /* 底部区域仲裁（dshBottomPanels 兼容机制）：占位让位 / 排他 / 释放归位且 open 态保留 */
-      UI.bottomPanel.open = true
-      ok('ui 底部区域被占位后面板让位', (UI.bottomArea.acquire('gtm-test'), uiStateQueue = [0, { left: 0, width: 900 }, true, true], UI.BottomPanel() === null) && UI.bottomPanel.open === true)
-      ok('ui 占位排他（他方 acquire/release 均拒）', UI.bottomArea.acquire('other') === false && UI.bottomArea.release('other') === false && UI.bottomArea.owner === 'gtm-test')
-      ok('ui 释放后归位（open 状态保留）', (UI.bottomArea.release('gtm-test'), uiStateQueue = [0, { left: 0, width: 900 }, true, true], UI.BottomPanel() !== null))
-      UI.bottomPanel.open = false
+
+      /* 便签小胶囊智能摘要切词测试 */
+      ok('qnSummarize 短文本直出', UI.qnSummarize('短文本') === '短文本')
+      const longCjk = '这是一个非常长的中文段落，用来测试智能摘要提取首尾词并用省略号连接的胶囊紧凑显示能力，确保输入框不被长文本刷屏。'
+      const sumCjk = UI.qnSummarize(longCjk, 3, 20)
+      ok('qnSummarize 中文首尾摘要', sumCjk.includes(' … ') && sumCjk.length < longCjk.length)
+      const longEn = 'The quick brown fox jumps over the lazy dog and runs across the wide open green meadow under the blue sky.'
+      const sumEn = UI.qnSummarize(longEn, 3, 30)
+      ok('qnSummarize 英文词切分首尾摘要', sumEn.includes(' … ') && sumEn.length < longEn.length)
     } catch (e) {
       uiErr = String((e && e.stack) || e)
       ok('ui 无头驱动', false, uiErr)
@@ -559,10 +655,10 @@ try {
     const onL = (t2, f) => { (listeners[t2] = listeners[t2] || []).push(f) }
     const fakeWin = { addEventListener: onL, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }
     const fakeDoc = { addEventListener: onL, removeEventListener() {}, visibilityState: 'visible' }
-    const dSrc = ['00-header.js', '01-stores.js', '02-markdown.js', '05-icons.js', '06-misc.js', '07-code-csv.js', '11-details.js']
+    const dSrc = ['00-header.js', '01-stores.js', '02-markdown.js', '03-tree.js', '05-icons.js', '06-misc.js', '07-code-csv.js', '10-panels.js', '11-details.js', '12-mdpath.js']
       .map((f) => readFileSync(new URL('./workbench/' + f, import.meta.url), 'utf8'))
       .join('\n')
-    const D2 = new Function('React', 'API', 'host', 'window', 'document', dSrc + '\nreturn { Details, store, sessionProbe }')(
+    const D2 = new Function('React', 'API', 'host', 'window', 'document', dSrc + '\nreturn { Details, store, sessionProbe, panelStore }')(
       fakeReact, '/__dsh-geek-sidebar__', hostStub, fakeWin, fakeDoc,
     )
     try {
@@ -623,6 +719,10 @@ try {
       const colBtn = findAll(tree, (n) => n.props && n.props.title === '收起右栏')[0]
       colBtn.props.onClick()
       ok('ui Details 缩放态 » 连带 closeDetails', closeLog.length === 1)
+      /* v1.22.0：产物面板移除后，Details 头部不再渲染「对话产物与链接」入口（任何模式） */
+      fakeReact.__resetRefs()
+      tree = D2.Details({ layout: null })
+      ok('ui Details 无产物入口钮', findAll(tree, (n) => n.props && n.props.title === '对话产物与链接').length === 0)
     } catch (e) {
       ok('ui Details 预览缩放守卫', false, String((e && e.stack) || e))
     }

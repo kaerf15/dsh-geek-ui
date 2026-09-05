@@ -1,0 +1,4 @@
+# dsh-geek-header bundle patch：向 profile 组合树插入本插件（host 半为空壳，能力全在 client 半）。
+- insert:
+    - id: dsh-geek-header
+      name: dsh-geek-header

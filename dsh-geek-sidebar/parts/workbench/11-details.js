@@ -26,6 +26,56 @@ function detailsAlive(sid, path) {
   return sessionProbe.sid === sid && store.bucket(sid).active === path;
 }
 
+function parseGitDiff(diffText) {
+  if (!diffText) return [];
+  const rawLines = diffText.split("\n");
+  const parsed = [];
+  let oldLine = 0;
+  let newLine = 0;
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    const raw = rawLines[idx];
+    if (
+      raw.startsWith("diff --git") ||
+      raw.startsWith("index ") ||
+      raw.startsWith("--- ") ||
+      raw.startsWith("+++ ") ||
+      raw.startsWith("\\")
+    ) {
+      continue;
+    }
+    const hunkMatch = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      oldLine = parseInt(hunkMatch[1], 10);
+      newLine = parseInt(hunkMatch[2], 10);
+      continue;
+    }
+    if (raw.startsWith("+")) {
+      parsed.push({
+        type: "add",
+        lineNo: newLine++,
+        prefix: "+",
+        text: raw.slice(1),
+      });
+    } else if (raw.startsWith("-")) {
+      parsed.push({
+        type: "del",
+        lineNo: oldLine++,
+        prefix: "-",
+        text: raw.slice(1),
+      });
+    } else {
+      parsed.push({
+        type: "ctx",
+        lineNo: newLine++,
+        prefix: " ",
+        text: raw.startsWith(" ") ? raw.slice(1) : raw,
+      });
+      oldLine++;
+    }
+  }
+  return parsed;
+}
+
 function Details(t) {
   const e = React.createElement,
     s = t.layout,
@@ -33,8 +83,10 @@ function Details(t) {
   React.useEffect(() => sessionProbe.sub(() => a((i) => i + 1)), []);
   const sidRef = React.useRef(sessionProbe.sid);
   React.useEffect(() => {
-    sidRef.current !== sessionProbe.sid &&
-      ((sidRef.current = sessionProbe.sid), a((i) => i + 1));
+    if (sidRef.current !== sessionProbe.sid) {
+      /* 切会话平台会关 details 列（AppFrame 私有面），缩放态跟着退，别让 fixed 面板悬空 */
+      ((sidRef.current = sessionProbe.sid), setZoomed(!1), a((i) => i + 1));
+    }
   });
   const l = usePreviewState(sessionProbe.sid),
     c = l.activeFile,
@@ -72,6 +124,78 @@ function Details(t) {
   React.useEffect(() => {
     edRef.current = ed;
   });
+  const zm = React.useState(!1),
+    zoomed = zm[0],
+    setZoomed = zm[1],
+    rootRef = React.useRef(null),
+    diffSt = React.useState(""),
+    diffText = diffSt[0],
+    setDiffText = diffSt[1],
+    diffLdSt = React.useState(!1),
+    diffLoading = diffLdSt[0],
+    setDiffLoading = diffLdSt[1],
+    diffParsed = React.useMemo(() => parseGitDiff(diffText), [diffText]),
+    loadDiff = (targetPath) => {
+      if (!targetPath) return;
+      setDiffLoading(!0);
+      host
+        .call("workbench.gitDiff", { path: targetPath })
+        .then((res) => {
+          setDiffLoading(!1);
+          setDiffText((res && res.diff) || "");
+        })
+        .catch(() => {
+          setDiffLoading(!1);
+          setDiffText("");
+        });
+    };
+  /* 预览缩放（⤢）：不碰平台右栏宽度（300–520 是 ui-layout columns.ts 的契约钳制），
+   * 纯 CSS 把自家 .pw-details 切成 fixed 居中大面板——DOM 不动、组件不卸载，
+   * 滚动位置 / 编辑 buffer / 已加载内容零损失；Esc / 点遮罩 / 再点按钮收回。
+   * Platform-private surface：fixed 定位依赖 details 槽祖先链无 transform/filter
+   * 捕获（ui-layout AppFrame.module.css 当前满足；被捕获时 fixed 退化为相对该祖先，
+   * 视觉上卡死在栏内）——toggleZoom 一次性自检，平台升级先核它。 */
+  const fixedCaptured = (el) => {
+    for (let n = el && el.parentElement; n; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (
+        cs.transform !== "none" ||
+        cs.filter !== "none" ||
+        cs.backdropFilter !== "none" ||
+        cs.perspective !== "none" ||
+        /* paint/strict/content 含 paint  containment → 也捕获 fixed */
+        /paint|strict|content/.test(cs.contain) ||
+        cs.contentVisibility !== "visible" ||
+        (cs.willChange !== "auto" && cs.willChange !== "none")
+      )
+        return true;
+    }
+    return false;
+  };
+  const toggleZoom = () => {
+    if (zoomed) return setZoomed(!1);
+    if (fixedCaptured(rootRef.current))
+      return console.warn("[dsh-geek-sidebar] 预览缩放取消：details 祖先链出现 transform/filter/contain 捕获，fixed 会退化（平台布局变了，先核 AppFrame.module.css）");
+    setZoomed(!0);
+  };
+  React.useEffect(() => {
+    if (!zoomed) return undefined;
+    const onKey = (ev) => {
+      /* 图片放大开着时 Esc 归 ImgZoomView，一层一层退；编辑中 Esc 不收面板（edRef 实时读，免 deps 抖动） */
+      if (ev.key === "Escape" && !imgZoomStore.src && !edRef.current) setZoomed(!1);
+    };
+    document.addEventListener("keydown", onKey);
+    /* 窄屏（≤1219px，对齐 13-drawer 断点）让步链派生关栏 + drawer 出场——退缩放让位，防 fixed 面板悬空撞层 */
+    const mq = window.matchMedia("(max-width:1219px)");
+    const onNarrow = () => {
+      mq.matches && setZoomed(!1);
+    };
+    mq.addEventListener("change", onNarrow);
+    onNarrow();
+    return () => {
+      (document.removeEventListener("keydown", onKey), mq.removeEventListener("change", onNarrow));
+    };
+  }, [zoomed]);
   React.useEffect(() => {
     if ((m(null), p(""), R(!1), b(!1), E(!1), setEd(!1), (D.current = []), !c))
       return;
@@ -91,9 +215,23 @@ function Details(t) {
     );
   }, [c && c.path]);
   React.useEffect(() => {
+    if (c && c.modeHint === "diff") {
+      g("diff");
+    } else if (c && !c.modeHint && h === "diff") {
+      g("auto");
+    }
+  }, [c && c.path, c && c.modeHint]);
+  React.useEffect(() => {
+    if (h === "diff" && c) loadDiff(c.path);
+  }, [c && c.path, h]);
+  React.useEffect(() => {
     if (!c) return;
     const rf = () => {
       if (edRef.current || document.visibilityState !== "visible") return;
+      if (h === "diff") {
+        c && loadDiff(c.path);
+        return;
+      }
       const sid0 = sessionProbe.sid, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
@@ -159,90 +297,157 @@ function Details(t) {
         N.scrollIntoView({ behavior: "smooth", block: "start" }),
         E(!1));
     },
-    q = () => (
-      (D.current = []),
-      c
-        ? r
-          ? r.error
-            ? e(
-                "div",
-                { className: "pw-hint", style: { padding: "20px" } },
-                "无法预览：" + r.error,
-              )
-            : r.kind === "image"
-              ? e(
-                  "div",
-                  { className: "pw-img-wrap" },
-                  e("img", {
-                    src: r.url,
-                    alt: c.name,
-                    onClick: (g) => {
-                      (g.stopPropagation(), imgZoomStore.set(r.url));
-                    },
-                  }),
-                )
-              : r.kind === "pdf"
-                ? e("iframe", {
-                    className: "pw-frame",
-                    src: r.url,
-                    title: c.name,
-                  })
-                : r.kind === "html"
-                  ? e("iframe", {
-                      className: "pw-frame",
-                      srcDoc: r.html || "",
-                      sandbox: "",
-                      title: c.name,
-                    })
-                  : r.kind === "text" && isHtmlExt(c.name)
-                    ? e("iframe", {
-                        className: "pw-frame",
-                        srcDoc: r.text || "",
-                        sandbox: "",
-                        title: c.name,
-                      })
-                    : j === "preview"
-                      ? e(
-                          "div",
-                          { className: "pw-md" },
-                          renderMarkdown(
-                            r.text || "",
-                            D.current,
-                            c && c.path ? c.path.replace(/\/[^/]*$/, "") : "",
-                          ),
-                        )
-                      : isCsvExt(c.name)
-                        ? e(CsvView, { text: r.text || "" })
-                        : isCodeExt(c.name)
-                          ? e(
-                              "div",
-                              { className: "pw-codeview" },
-                              highlightCode(
-                                r.text || "",
-                                c.name.split(".").pop().toLowerCase(),
-                              ),
-                            )
-                          : e("pre", { className: "pw-src" }, r.text || "")
-          : e(
-              "div",
-              { className: "pw-hint", style: { padding: "20px" } },
-              "加载中…",
-            )
-        : e(
+    q = () => {
+      (D.current = []);
+      if (!c) {
+        return e(
+          "div",
+          { className: "pw-empty" },
+          e("div", { className: "pw-empty-logo" }, FileTextIcon(40)),
+          e("div", null, "在左侧「项目」或「知识库」中点击文件进行预览"),
+          e(
+            "div",
+            { className: "pw-hint" },
+            "支持多标签 · Markdown / 图片 / 文本",
+          ),
+        );
+      }
+      if (j === "diff") {
+        if (diffLoading) {
+          return e(
+            "div",
+            { className: "pw-hint", style: { padding: "20px" } },
+            "加载 Diff 中…",
+          );
+        }
+        if (!diffText || !diffText.trim()) {
+          return e(
             "div",
             { className: "pw-empty" },
-            e("div", { className: "pw-empty-logo" }, FileTextIcon(40)),
-            e("div", null, "在左侧「项目」或「笔记」中点击文件进行预览"),
+            e("div", { style: { fontWeight: 600, fontSize: "14px" } }, "无未提交变更"),
             e(
               "div",
-              { className: "pw-hint" },
-              "支持多标签 · Markdown / 图片 / 文本",
+              { style: { fontSize: "12px", color: "var(--dsw-alias-label-secondary)" } },
+              "当前文件与 Git HEAD 保持一致",
             ),
-          )
-    );
+          );
+        }
+        if (diffText.includes("Binary files") || diffText.includes("GIT binary patch")) {
+          return e(
+            "div",
+            { className: "pw-empty" },
+            e("div", { style: { fontWeight: 600, fontSize: "14px" } }, "二进制文件变更"),
+            e(
+              "div",
+              { style: { fontSize: "12px", color: "var(--dsw-alias-label-secondary)" } },
+              "二进制文件不提供内联差异文本比对",
+            ),
+          );
+        }
+        return e(
+          "div",
+          { className: "pw-diff-view" },
+          e(
+            "pre",
+            { className: "pw-diff-pre" },
+            diffParsed.map((l, idx) => {
+              const cls =
+                l.type === "add"
+                  ? "pw-diff-add"
+                  : l.type === "del"
+                    ? "pw-diff-del"
+                    : "pw-diff-ctx";
+              return e(
+                "div",
+                { key: idx, className: "pw-diff-line " + cls },
+                e("span", { className: "pw-diff-num" }, l.lineNo),
+                e("span", { className: "pw-diff-prefix" }, l.prefix),
+                e("span", { className: "pw-diff-code" }, l.text || "\u00a0"),
+              );
+            }),
+          ),
+        );
+      }
+      if (!r) {
+        return e(
+          "div",
+          { className: "pw-hint", style: { padding: "20px" } },
+          "加载中…",
+        );
+      }
+      if (r.error) {
+        return e(
+          "div",
+          { className: "pw-hint", style: { padding: "20px" } },
+          "无法预览：" + r.error,
+        );
+      }
+      if (r.kind === "image") {
+        return e(
+          "div",
+          { className: "pw-img-wrap" },
+          e("img", {
+            src: r.url,
+            alt: c.name,
+            onClick: (g) => {
+              (g.stopPropagation(), imgZoomStore.set(r.url));
+            },
+          }),
+        );
+      }
+      if (r.kind === "pdf") {
+        return e("iframe", {
+          className: "pw-frame",
+          src: r.url,
+          title: c.name,
+        });
+      }
+      if (r.kind === "html" || (r.kind === "text" && isHtmlExt(c.name))) {
+        return e("iframe", {
+          className: "pw-frame",
+          srcDoc: r.html || r.text || "",
+          sandbox: "",
+          title: c.name,
+        });
+      }
+      if (j === "preview") {
+        return e(
+          "div",
+          { className: "pw-md" },
+          renderMarkdown(
+            r.text || "",
+            D.current,
+            c && c.path ? pathDir(c.path) : "",
+          ),
+        );
+      }
+      if (isCsvExt(c.name)) {
+        return e(CsvView, { text: r.text || "" });
+      }
+      if (isCodeExt(c.name)) {
+        return e(
+          "div",
+          { className: "pw-codeview" },
+          highlightCode(
+            r.text || "",
+            c.name.split(".").pop().toLowerCase(),
+          ),
+        );
+      }
+      return e("pre", { className: "pw-src" }, r.text || "");
+    };
   return e(
-    "div",
-    { className: "pw-details" },
+    React.Fragment,
+    null,
+    zoomed
+      ? e("div", {
+          className: "pw-zoomview-mask",
+          onClick: () => setZoomed(!1),
+        })
+      : null,
+    e(
+      "div",
+      { className: "pw-details" + (zoomed ? " zoomed" : ""), ref: rootRef },
     e(
       "div",
       { className: "pw-tabs" },
@@ -274,12 +479,26 @@ function Details(t) {
             ),
           ),
       e("span", { className: "pw-tabs-flex" }),
+      t.inDrawer
+        ? null
+        : e(
+            "button",
+            {
+              className: "pw-col-btn",
+              title: zoomed ? "收回预览 (Esc)" : "放大预览",
+              onClick: toggleZoom,
+            },
+            zoomed ? "⤡" : "⤢",
+          ),
       e(
         "button",
         {
           className: "pw-col-btn",
           title: "收起右栏",
-          onClick: () => s && s.closeDetails(),
+          /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
+          onClick: () => {
+            (setZoomed(!1), s && s.closeDetails());
+          },
         },
         "»",
       ),
@@ -288,7 +507,30 @@ function Details(t) {
       ? e(
           "div",
           { className: "pw-toolbar" },
-          e("span", { className: "pw-crumbs" }, K.join(" / ")),
+          e(
+            "span",
+            { className: "pw-crumbs" },
+            r && r.text
+              ? (() => {
+                  const ext = (c.name.split(".").pop() || "").toLowerCase();
+                  const langMap = {
+                    md: "markdown", markdown: "markdown", ts: "typescript", tsx: "tsx",
+                    js: "javascript", jsx: "jsx", py: "python", json: "json",
+                    yml: "yaml", yaml: "yaml", toml: "toml", css: "css", html: "html",
+                    sh: "bash", bash: "bash", rs: "rust", go: "go", sql: "sql",
+                  };
+                  const lang = langMap[ext] || ext || "text";
+                  const lines = r.text.split("\n").length;
+                  const bLen = new TextEncoder().encode(r.text).length;
+                  const sz = bLen < 1024 ? bLen + " B" : (bLen / 1024).toFixed(1) + " KB";
+                  return lang + " · " + lines + " 行 · " + sz + (r.truncated ? " (截断)" : "");
+                })()
+              : r && r.kind === "image"
+                ? "图片" + (r.size ? " · " + (r.size < 1024 ? r.size + " B" : (r.size / 1024).toFixed(1) + " KB") : "")
+                : r && r.kind === "pdf"
+                  ? "PDF" + (r.size ? " · " + (r.size < 1024 ? r.size + " B" : (r.size / 1024).toFixed(1) + " KB") : "")
+                  : "",
+          ),
           e(
             "span",
             { className: "pw-toolbar-right" },
@@ -311,13 +553,26 @@ function Details(t) {
               },
               "Source",
             ),
+            c && isMd(c.name)
+              ? e(
+                  "button",
+                  {
+                    className: "pw-tg" + (j === "preview" ? " on" : ""),
+                    onClick: () => g("preview"),
+                  },
+                  "Preview",
+                )
+              : null,
             e(
               "button",
               {
-                className: "pw-tg" + (j === "preview" ? " on" : ""),
-                onClick: () => g("preview"),
+                className: "pw-tg" + (j === "diff" ? " on" : ""),
+                onClick: () => {
+                  g("diff");
+                  c && loadDiff(c.path);
+                },
               },
-              "Preview",
+              "Diff",
             ),
             t.mentionBridge
               ? e(
@@ -330,7 +585,7 @@ function Details(t) {
                         sessionProbe.sid &&
                         t.mentionBridge.mention(
                           sessionProbe.sid,
-                          mentionPath(c.path),
+                          mentionRef(c.path, false),
                         );
                     },
                   },
@@ -472,5 +727,6 @@ function Details(t) {
           q(),
         ),
       e(ImgZoomView, null),
+    ),
   );
 }

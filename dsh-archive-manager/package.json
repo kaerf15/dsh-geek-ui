@@ -1,14 +1,13 @@
 {
-  "name": "dsh-geek-sidebar",
-  "version": "2.0.0",
+  "name": "dsh-archive-manager",
+  "version": "0.1.0",
   "license": "MIT",
-  "description": "DSH Web 极客侧栏：工作台侧栏与文件预览、便签划选与引用、技能管理弹窗、@文件提及桥、chat 文件点击接管。",
+  "description": "会话归档管理：侧栏独立入口面板，列出已归档会话，可放回对话或永久删除。",
   "keywords": [
     "dsh",
     "deepseek-harness",
     "dsh-plugin",
     "cordis",
-    "geek-ui",
     "web"
   ],
   "type": "module",
@@ -20,9 +19,6 @@
   ],
   "engines": {
     "node": ">=22.19.0"
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "exports": {
     ".": "./index.js",
@@ -39,7 +35,6 @@
     }
   },
   "scripts": {
-    "build": "node parts/build.mjs",
     "test": "node parts/smoke.mjs"
   }
 }
