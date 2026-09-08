@@ -1,8 +1,8 @@
 {
   "name": "dsh-geek-header",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "license": "MIT",
-  "description": "DSH Web 页头重排：第一行第三方插件区（geekUiHeader 服务），第二行收纳页签/谱系/动作平铺，面包屑文字与 Session log 隐藏，拥挤时动作折叠进 ⋯ 菜单。",
+  "description": "DSH Web 页头重排：第一行第三方插件区（geekUiHeader 服务），第二行收纳页签/谱系/动作平铺，面包屑与 Session log 隐藏；生成标题与系统提示词查看。",
   "keywords": [
     "dsh",
     "deepseek-harness",

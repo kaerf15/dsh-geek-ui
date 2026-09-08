@@ -2,6 +2,8 @@
  * dsh-geek-header host 半：页头配套 HTTP 接口。
  *
  * 路由（webServer 前缀挂载，随 Fiber 回收）：
+ *   GET  /__dsh-geek-header__/system-prompt?sessionId=…
+ *     → 返回当前会话 requestHeader().system（完整 model-facing system 字符串）。
  *   POST /__dsh-geek-header__/title/refresh  { sessionId, provider?, model? }
  *     → pi-web 同款标题生成：整段对话（用户+助手文本，超长保首条+尾部截断）
  *       + 末尾追加 pi-web 原版指令，走 ctx.llm.stream 辅助调用；
@@ -15,7 +17,7 @@
  *  1. session 事件读取走 session.snapshotEvents()（alpha.4 移除了 events getter）：
  *     user/message 的 data.source.kind==='user'、
  *     assistant/message 的 data.message.content 为块数组（text 块有 text 字段）。
- *  2. session.requestHeader() 返回 { config: { provider, model } }（缺省路由回落）。
+ *  2. session.requestHeader() 返回完整 EpochHeader（含 system/tools；缺省路由看 config）。
  *  3. ctx.llm.stream 的 chunk 契约：text-delta / finish.reason.kind==='stop'。
  *  4. ctx.sessionTitle.rename(session, title) 返回 { title }。
  *
@@ -134,6 +136,19 @@ function normalizeTitle(text) {
   return line.replace(/^[\s"'“”「」『』`*#]+|[\s"'“”「」『』`*#.!。！?？:：;；]+$/g, '').slice(0, 80)
 }
 
+function resolveOnlineSession(ctx, sessionId) {
+  const id = String(sessionId || '')
+  if (!id) throw httpError(400, 'sessionId is required')
+  const session = ctx.sessions.get(id)
+  if (!session) throw httpError(409, '会话不在线（未打开或已关闭）')
+  return session
+}
+
+function readSystemPrompt(session) {
+  const header = typeof session.requestHeader === 'function' ? session.requestHeader() : undefined
+  return header && typeof header.system === 'string' ? header.system : ''
+}
+
 async function generateTitle(ctx, session, body) {
   /* alpha.4 移除了 Session.events getter（→ snapshotEvents），读旧字段恒为 undefined。 */
   const conversation = fitBudget(collectConversation(session.snapshotEvents()))
@@ -190,12 +205,13 @@ export function apply(ctx) {
       const url = new URL(req.url || '/', 'http://localhost')
       const key = req.method + ' ' + url.pathname.slice('/__dsh-geek-header__'.length)
       try {
+        if (key === 'GET /system-prompt') {
+          const session = resolveOnlineSession(ctx, url.searchParams.get('sessionId'))
+          return send(res, 200, { system: readSystemPrompt(session) })
+        }
         if (key === 'POST /title/refresh') {
           const body = await readJson(req)
-          const sessionId = String(body.sessionId || '')
-          if (!sessionId) throw httpError(400, 'sessionId is required')
-          const session = ctx.sessions.get(sessionId)
-          if (!session) throw httpError(409, '会话不在线（未打开或已关闭）')
+          const session = resolveOnlineSession(ctx, body.sessionId)
           const title = await generateTitle(ctx, session, body)
           const accepted = ctx.sessionTitle.rename(session, title)
           return send(res, 200, { title: accepted.title })
@@ -208,5 +224,5 @@ export function apply(ctx) {
     },
   }), 'dsh-geek-header: http routes')
 
-  console.log('[dsh-geek-header] api mounted at /__dsh-geek-header__ (title/refresh)')
+  console.log('[dsh-geek-header] api mounted at /__dsh-geek-header__ (system-prompt, title/refresh)')
 }

@@ -4,7 +4,7 @@
  * 布局重排（官方 ConversationSessionHeader 的两栏页头 → 本插件的两行）：
  *   第一行  dgu-row1：第三方插件区。内容来自 cordis 服务 geekUiHeader.register()，
  *           官方不放任何东西；无注册时整行塌陷（:empty display:none）。
- *   第二行  页签（pi-web 式平面工具条）→ 「生成标题」按钮（钉在页签后面，不参与折叠）
+ *   第二行  页签（pi-web 式平面工具条）→ 「生成标题」→ 「系统提示词」按钮（钉在页签后，不参与折叠）
  *           → 右侧谱系控件 / preset 徽标 / 后台任务平铺；
  *           拥挤（动作区被挤换行）时动作区折叠进 ⋯ 下拉菜单。
  *   隐藏    面包屑标题文字 / “/” 分隔符、utilities 区（Session log 按钮）。
@@ -23,7 +23,7 @@
  *  3b. 槽锚点带内联 display:contents（scoped-slots 锚点契约，scoped-slots.tsx 的 ANCHOR_STYLE）——
  *     覆写锚点自身 display 必须 !important（utilities 槽的隐藏/面板化就依赖这个）。
  *  4. 页签样式覆写依赖 button[aria-selected]；配色依赖 --dsw-alias-* 主题 token。
- *  5. 注入节点（.dgu-row1/.dgu-title-anchor/.dgu-toggle）插在 React 管理的 header 内：
+ *  5. 注入节点（.dgu-row1/.dgu-seg-anchor/.dgu-toggle）插在 React 管理的 header 内：
  *     React 卸载时按节点引用移除自己的子节点，不认得的注入节点不会被误删；
  *     header 整体重挂载时 MutationObserver 重新注入。
  *  6. 「生成标题」读取 ctx.modelDirectories（ui-model-selection 的服务）拿当前选中模型；
@@ -97,7 +97,7 @@ header[data-dgu-root] > .dgu-row1:not(:empty) {
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > [data-dgu="tabs"],
-header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > .dgu-title-anchor,
+header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > .dgu-seg-anchor,
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) [data-dgu="cluster"],
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > .dgu-toggle { margin-top: -1px; }
 
@@ -119,7 +119,7 @@ header[data-dgu-root] > [data-dgu="tabs"] {
  *（底边让位给 header::after 通栏线）、直角、透明底。各类型只补化妆属性。
  * actions/lineage 用 > *：第三方注册进来的任何形状都自动套格子，不只认 span / div>button。 */
 header[data-dgu-root] > [data-dgu="tabs"] > button,
-header[data-dgu-root] .dgu-title-btn,
+header[data-dgu-root] .dgu-seg-btn,
 header[data-dgu-root] [data-slot="conversation.session.header.actions"] > *,
 header[data-dgu-root] [data-slot="conversation.session.header.lineage"] > *,
 header[data-dgu-root] > .dgu-toggle {
@@ -150,28 +150,65 @@ header[data-dgu-root] > [data-dgu="tabs"] > button[aria-selected="true"] {
   font-weight: 500;
 }
 
-/* 「生成标题」锚点：钉在页签后面的一个分段（order 与页签相同、DOM 紧随 tabs），不参与折叠 */
-header[data-dgu-root] > .dgu-title-anchor {
+/* 分段条后段锚点：生成标题 / 系统提示词等，order 与页签相同、DOM 紧随 tabs */
+header[data-dgu-root] > .dgu-seg-anchor {
   order: 2;
   display: flex;
   align-items: stretch;
   height: 36px;
   margin-left: -1px;
 }
+header[data-dgu-root] > .dgu-seg-anchor.dgu-prompt-anchor { position: relative; }
 
-/* 生成标题按钮的化妆（骨架见共享块） */
-.dgu-title-btn {
+.dgu-seg-btn {
   color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
   white-space: nowrap;
 }
-.dgu-title-btn:hover:not(:disabled) {
+.dgu-seg-btn:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-primary);
 }
-.dgu-title-btn:disabled { cursor: default; opacity: .5; }
+.dgu-seg-btn:disabled { cursor: default; opacity: .5; }
 .dgu-title-btn.dgu-title-done { color: var(--dsw-alias-state-business-primary); opacity: 1; }
 .dgu-title-btn.dgu-title-error { color: #dc2626; opacity: 1; }
+.dgu-prompt-btn[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dgu-prompt-panel {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 40px));
+  min-width: 280px;
+  max-height: min(60vh, 480px);
+  overflow: auto;
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-lv3);
+  z-index: 60;
+}
+.dgu-prompt-anchor:has(.dgu-prompt-btn[aria-expanded="true"]) .dgu-prompt-panel { display: block; }
+.dgu-prompt-panel pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--dsw-alias-label-tertiary);
+  font: 400 11px/16px var(--ds-font-family-code);
+}
+.dgu-prompt-empty,
+.dgu-prompt-status {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 18px;
+}
+.dgu-prompt-status.dgu-prompt-error { color: #dc2626; }
 
 /* 动作区/谱系格子里的原生控件：撑满格子、去自身边框底色（点击区域=整格） */
 header[data-dgu-root] [data-slot="conversation.session.header.actions"] > * button,
@@ -283,7 +320,8 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
 
 /* ===== 会话流「System prompt」折叠块隐藏 =====
  * 0.1.2 平台会话流新增（ui-chat SystemPromptRow，0.1.1 没有）：每个已完成回答前折叠
- * 展示系统提示词。用户不需要看 → 整节点隐藏。该 data 属性 0.1.1 也有，规则对旧版是无害 no-op。
+ * 展示系统提示词。已迁至页头「系统提示词」按钮 → 会话流整节点隐藏。
+ * 该 data 属性 0.1.1 也有，规则对旧版是无害 no-op。
  * 归口说明：此规则属「会话区内容呈现」，由本插件（页头/会话区）统一管理，勿放侧栏插件。 */
 [data-chat-flow-kind="system-prompt"] { display: none !important; }
 `
@@ -330,15 +368,25 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
      * “换了模型还没发消息”也准确），随请求体上送；读不到则 host 回落 requestHeader。
      * 状态机照 pi-web：idle → busy（正在生成…）→ done（2s 回落）/ error（红 4s 回落，
      * tooltip 带原因）；空会话禁用。纯文字按钮，无图标。 */
+    async function fetchGeekHeader(path, init) {
+      const res = await fetch('/__dsh-geek-header__' + path, init)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status))
+      return data
+    }
+
     async function requestTitleRefresh(sessionId, route) {
-      const res = await fetch('/__dsh-geek-header__/title/refresh', {
+      const data = await fetchGeekHeader('/title/refresh', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId, ...route }),
       })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status))
       return data.title
+    }
+
+    async function fetchSystemPrompt(sessionId) {
+      const data = await fetchGeekHeader('/system-prompt?sessionId=' + encodeURIComponent(sessionId))
+      return typeof data.system === 'string' ? data.system : ''
     }
 
     /* 会话列表快照 → { id, blank }，memo 化引用（多实例共享同一 memo 无碍：值由同一 store 决定） */
@@ -351,14 +399,15 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       return lastSessionView
     }
 
-    function TitleButton(props) {
-      const sessions = props.sessions
-      /* 单订阅读出「当前会话 + 空白态」；getSnapshot 经 readSessionView memo 化，
-       * 返回稳定引用（useSyncExternalStore 对快照做 Object.is 比较，新对象会空转重渲） */
-      const view = useSyncExternalStore(
+    function useSessionView(sessions) {
+      return useSyncExternalStore(
         (fn) => sessions.list.subscribe(fn),
         () => readSessionView(sessions),
       )
+    }
+
+    function TitleButton(props) {
+      const view = useSessionView(props.sessions)
       const sessionId = view.id
       const blank = view.blank
       const [state, setState] = useState({ kind: 'idle' })
@@ -410,7 +459,7 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
 
       return h('button', {
         type: 'button',
-        className: 'dgu-title-btn dgu-title-' + state.kind,
+        className: 'dgu-seg-btn dgu-title-btn dgu-title-' + state.kind,
         disabled,
         title: tip,
         'aria-label': label,
@@ -418,18 +467,97 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       }, label)
     }
 
-    /* 每个 header 的注入内容：row1 渲染位 + portal 到标题锚点的「生成标题」 */
+    function SystemPromptButton(props) {
+      const anchor = props.promptAnchor
+      const view = useSessionView(props.sessions)
+      const sessionId = view.id
+      const blank = view.blank
+      const [open, setOpen] = useState(false)
+      const [state, setState] = useState({ kind: 'idle' })
+
+      useEffect(() => { setOpen(false); setState({ kind: 'idle' }) }, [sessionId])
+
+      useEffect(() => {
+        if (!open || sessionId === undefined) return
+        let cancelled = false
+        setState({ kind: 'loading' })
+        void fetchSystemPrompt(String(sessionId)).then((system) => {
+          if (cancelled) return
+          setState(system ? { kind: 'ready', system } : { kind: 'empty' })
+        }, (err) => {
+          if (cancelled) return
+          setState({ kind: 'error', message: String((err && err.message) || err) })
+        })
+        return () => { cancelled = true }
+      }, [open, sessionId])
+
+      useEffect(() => {
+        if (!open || !anchor) return
+        const onDocDown = (e) => {
+          if (!anchor.contains(e.target)) {
+            setOpen(false)
+            setState({ kind: 'idle' })
+          }
+        }
+        document.addEventListener('pointerdown', onDocDown)
+        return () => { document.removeEventListener('pointerdown', onDocDown) }
+      }, [open, anchor])
+
+      const disabled = blank || sessionId === undefined
+      const label = '系统提示词'
+      const tip = blank ? '请先发送消息，再查看系统提示词'
+        : '查看当前生效的完整 system 提示词（不含上下文注入与工具 schema；破甲等变更需等下一次模型请求后刷新）'
+
+      const panelBody = state.kind === 'loading'
+        ? h('p', { className: 'dgu-prompt-status' }, '加载中…')
+        : state.kind === 'error'
+          ? h('p', { className: 'dgu-prompt-status dgu-prompt-error' }, state.message)
+          : state.kind === 'empty'
+            ? h('p', { className: 'dgu-prompt-empty' }, '当前请求没有系统提示词')
+            : state.kind === 'ready'
+              ? h('pre', null, state.system)
+              : null
+
+      const onClick = () => {
+        if (disabled) return
+        if (open) {
+          setOpen(false)
+          setState({ kind: 'idle' })
+          return
+        }
+        setState({ kind: 'loading' })
+        setOpen(true)
+      }
+
+      return h(React.Fragment, null,
+        h('button', {
+          type: 'button',
+          className: 'dgu-seg-btn dgu-prompt-btn',
+          disabled,
+          title: tip,
+          'aria-label': label,
+          'aria-expanded': open,
+          onClick,
+        }, label),
+        h('div', { className: 'dgu-prompt-panel', role: 'region', 'aria-label': label }, panelBody))
+    }
+
+    /* 每个 header 的注入内容：row1 渲染位 + portal 到标题/系统提示词锚点 */
     function HeaderExtras(props) {
       return h(React.Fragment, null,
         h(Row1, { registry: props.registry, sessions: props.sessions }),
         ReactDOM.createPortal(
           h(TitleButton, { sessions: props.sessions, modelDirectories: props.modelDirectories }),
           props.titleAnchor,
+        ),
+        ReactDOM.createPortal(
+          h(SystemPromptButton, { sessions: props.sessions, promptAnchor: props.promptAnchor }),
+          props.promptAnchor,
         ))
     }
 
     /* ============================ header 装饰 ============================ */
-    const records = new Map() /* header element -> { root, row1, titleAnchor, toggle, ro, onDocDown, onToggle } */
+    const records = new Map() /* header element -> { root, row1, titleAnchor, promptAnchor, toggle, ro, onDocDown, onToggle } */
 
     /* 页签行打标：官方只在视图数 > 1 时渲染 tabs div，且 React 会随时增删它，
      * 所以不在 decorate 一次性打标，而是每次测量/扫描时幂等补标。 */
@@ -445,9 +573,13 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
     function measure(header) {
       const rec = records.get(header)
       const tabs = markTabs(header)
-      /* 「生成标题」锚点钉位维护：tabs 被 React 重建后锚点要重新紧随它 */
+      /* 「生成标题」锚点：初始挂在 header 末尾，measure() 负责钉到 tabs 后面 */
       if (rec && tabs && rec.titleAnchor.previousElementSibling !== tabs) {
         header.insertBefore(rec.titleAnchor, tabs.nextSibling)
+      }
+      /* 「系统提示词」锚点：紧随「生成标题」 */
+      if (rec && rec.titleAnchor && rec.promptAnchor.previousElementSibling !== rec.titleAnchor) {
+        header.insertBefore(rec.promptAnchor, rec.titleAnchor.nextSibling)
       }
       const wasOpen = header.hasAttribute('data-dgu-actions-open')
       header.removeAttribute('data-dgu-actions-open')
@@ -504,8 +636,13 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
 
       /* 「生成标题」锚点：初始挂在 header 末尾，measure() 负责钉到 tabs 后面 */
       const titleAnchor = document.createElement('div')
-      titleAnchor.className = 'dgu-title-anchor'
+      titleAnchor.className = 'dgu-seg-anchor dgu-title-anchor'
       header.appendChild(titleAnchor)
+
+      /* 「系统提示词」锚点：紧随 titleAnchor */
+      const promptAnchor = document.createElement('div')
+      promptAnchor.className = 'dgu-seg-anchor dgu-prompt-anchor'
+      header.appendChild(promptAnchor)
 
       /* ⋯ 折叠开关（仅拥挤时由 CSS 放出） */
       const toggle = document.createElement('button')
@@ -537,12 +674,13 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
         sessions: services.sessions,
         modelDirectories: services.modelDirectories,
         titleAnchor,
+        promptAnchor,
       }))
 
       const ro = new ResizeObserver(() => measure(header))
       ro.observe(header)
 
-      records.set(header, { root, row1, titleAnchor, toggle, ro, onDocDown, onToggle })
+      records.set(header, { root, row1, titleAnchor, promptAnchor, toggle, ro, onDocDown, onToggle })
       measure(header)
     }
 
@@ -556,6 +694,7 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       rec.root.unmount()
       rec.row1.remove()
       rec.titleAnchor.remove()
+      rec.promptAnchor.remove()
       rec.toggle.remove()
     }
 
@@ -625,7 +764,7 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
         }
       }, 'dsh-geek-header: header decorator')
 
-      console.log('[dsh-geek-header] mounted (row1 = geekUiHeader registry, row2 = tabs + 生成标题 + actions, crumbs/utilities hidden)')
+      console.log('[dsh-geek-header] mounted (row1 = geekUiHeader registry, row2 = tabs + 生成标题 + 系统提示词 + actions, crumbs/utilities hidden)')
     }
 
     return module.exports

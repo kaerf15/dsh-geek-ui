@@ -27,7 +27,10 @@ check('client.js ModuleLoader 包装', client.startsWith('window.__ModuleLoader_
 check('client.js id 一致', client.includes("id: 'dsh-geek-header'"))
 check('client.js exports.inject 声明 sessions', client.includes("exports.inject = ['sessions']"))
 check('client.js 提供 geekUiHeader 服务', client.includes("ctx.provide('geekUiHeader')"))
-check('client.js 生成标题锚点（钉在页签后）', client.includes("className = 'dgu-title-anchor'") && client.includes('previousElementSibling !== tabs'))
+check('client.js 生成标题锚点（钉在页签后）', client.includes("className = 'dgu-seg-anchor dgu-title-anchor'") && client.includes('previousElementSibling !== tabs'))
+check('client.js 系统提示词锚点（紧随生成标题）', client.includes("className = 'dgu-seg-anchor dgu-prompt-anchor'") && client.includes('rec.promptAnchor'))
+check('client.js 分段条按钮共享样式', client.includes('.dgu-seg-btn') && client.includes('fetchGeekHeader'))
+check('client.js 系统提示词 host 拉取', client.includes('/system-prompt?sessionId='))
 check('client.js 读取当前选中模型', client.includes('modelDirectories'))
 
 /* 回归守护：本轮修过的坑不许回来 */
@@ -46,6 +49,8 @@ check('v0.4.4：谱系槽内双 dropdown 接缝', client.includes('header.lineag
 
 const host = read('index.js')
 check('index.js 挂载 title/refresh 路由', host.includes("POST /title/refresh"))
+check('index.js 挂载 system-prompt 路由', host.includes("GET /system-prompt"))
+check('index.js 在线会话解析复用', host.includes('resolveOnlineSession'))
 check('index.js pi-web 原版指令', host.includes('Create a concise title for this session based on the conversation above.'))
 check('index.js 整段对话采集', host.includes("ev.type === 'assistant/message'"))
 check('v0.4.5：事件读取走 snapshotEvents（alpha.4 移除 Session.events getter）', host.includes('session.snapshotEvents()') && !host.includes('session.events'))
