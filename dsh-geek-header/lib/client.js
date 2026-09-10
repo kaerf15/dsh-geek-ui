@@ -73,6 +73,12 @@ header[data-dgu-root] > [data-dgu="titlerow"] { display: contents; }
 header[data-dgu-root] [data-slot="conversation.session.header.utilities"] { display: none !important; }
 header[data-dgu-root] div:has(> [data-slot="conversation.session.header.utilities"]) { display: none !important; }
 
+/* 右栏开关图标矫正：官方图标库只有 IconPanelLeftOutline16（隔断在左），用在
+ * 右侧栏开关上语义反了（也不象用户旧版右栏开关的样子）。水平翻转使隔断居右。
+ * 两处同构：页头 corner 槽的展开钮 + 右栏内部的收起钮。 */
+header[data-dgu-root] [data-sidebar-right-expand] svg,
+[data-sidebar-right-toggle] svg { transform: scaleX(-1); }
+
 /* 官方预设选择器（agent-preset 座位：图标+预设名+下拉箭头）整颗隐藏。
  * 定位双条件：actions 槽领头位（order -10 最低者排最前）+ 自身或子级是
  * 带 aria-haspopup="menu" 的菜单钮——两个特征都中才杀，官方位次调整时宁漏勿误。
