@@ -145,8 +145,18 @@ function resolveOnlineSession(ctx, sessionId) {
 }
 
 function readSystemPrompt(session) {
-  const header = typeof session.requestHeader === 'function' ? session.requestHeader() : undefined
-  return header && typeof header.system === 'string' ? header.system : ''
+  /* 0.1.5：EpochHeader 不再有 system 字段——系统提示词落为会话流里的
+   * 'system/message' 事件（SystemPromptProjection 语义：首个节点持有效文本，
+   * 后续激活节点置空）。取事件序里第一个非空文本即当前生效的完整 system。 */
+  try {
+    for (const ev of session.snapshotEvents()) {
+      if (!ev || ev.type !== 'system/message') continue
+      const content = ev.data && ev.data.message && ev.data.message.content
+      const text = Array.isArray(content) ? content.map((p) => (p && p.text) || '').join('') : ''
+      if (text) return text
+    }
+  } catch {}
+  return ''
 }
 
 async function generateTitle(ctx, session, body) {
