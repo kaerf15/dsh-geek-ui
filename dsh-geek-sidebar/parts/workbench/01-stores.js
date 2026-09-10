@@ -234,12 +234,17 @@ function occurTarget(sid) {
 function previewKeyFor(sid) {
   return (sid && occurTarget(sid)) || sid;
 }
+/* 实例挂载：登记 + 收养会话裸桶。合并语义而非「空才收」——body 卸载期
+ *（同栏切走再切回）写入会落裸桶，重挂载时自身桶可能非空，一律把裸桶里
+ * 自己没有的文件并入、活动项跟随裸桶，收完即移空。 */
 function occurAdopt(key, sid) {
   occurAdd(key, sid);
   const mine = store.bucket(key),
     legacy = sid && store.buckets[sid];
-  if (mine.files.length === 0 && legacy && legacy.files.length > 0) {
-    ((mine.files = legacy.files), (mine.active = legacy.active));
+  if (legacy && legacy.files.length > 0) {
+    for (const f of legacy.files)
+      mine.files.some((x) => x.path === f.path) || mine.files.push(f);
+    legacy.active && (mine.active = legacy.active);
     ((legacy.files = []), (legacy.active = null));
     bus.fire();
   }

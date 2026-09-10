@@ -44,19 +44,19 @@ function GeekPreviewBody(u) {
        * 既有服务面（旧 details 槽经 owner props 传入），不能丢 */
       sessionId: u.sessionId,
       okey,
-      layout: GEEK_PREVIEW_DEPS.layout,
+      layout: u.deps.layout,
       inDrawer: true,
-      workspacesSvc: GEEK_PREVIEW_DEPS.workspacesSvc,
-      mentionBridge: GEEK_PREVIEW_DEPS.mentionBridge,
+      workspacesSvc: u.deps.workspacesSvc,
+      mentionBridge: u.deps.mentionBridge,
     }),
   );
 }
 
-/* 注册预览 tab：类型定义 + body。deps 取自 apply 闭包（layout/workspacesSvc/mentionBridge）。
+/* 注册预览 tab：类型定义 + body。deps 取自 apply 闭包（layout/workspacesSvc/mentionBridge），
+ * 经注册闭包作为 props 传入 body，不留模块级可变面。
  * body 传 inDrawer=true：栏内模式下 geek 自绘的缩放/收栏钮隐藏，开关交给平台 tab 铬。
  * guide 入口：平台的默认页规则是「全应用只有一个 guide 入口时它成为默认页」——
  * 官方 files 已被本插件禁用（入口为 0），本入口补位后右栏首开即预览而非「开始」。 */
-const GEEK_PREVIEW_DEPS = {};
 function installRightbarPreview(t, deps) {
   const tabs = t.get("sidebarRightTabs");
   const sbr = t.get("sidebarRight");
@@ -66,7 +66,6 @@ function installRightbarPreview(t, deps) {
     return;
   }
   rightbarSvc = sbr;
-  Object.assign(GEEK_PREVIEW_DEPS, deps);
   t.effect(
     () =>
       tabs.register({
@@ -81,7 +80,7 @@ function installRightbarPreview(t, deps) {
     () =>
       slots.inject("sidebar.right.pane.tab", () =>
         slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, (u) =>
-          React.createElement(GeekPreviewBody, u),
+          React.createElement(GeekPreviewBody, Object.assign({}, u, { deps })),
         ),
       ),
     "geek-sidebar: preview tab body",
