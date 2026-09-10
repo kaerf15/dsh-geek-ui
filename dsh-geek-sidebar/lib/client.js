@@ -3821,8 +3821,17 @@ function Details(t) {
           N.preventDefault();
           try {
             const d = JSON.parse(raw);
-            d.from !== pkey && d.path &&
-              (store.close(d.from, d.path), store.open(pkey, { path: d.path, name: d.name || d.path }));
+            if (d.from === pkey || !d.path) return;
+            const tgt = store.bucket(pkey);
+            if (tgt.files.some((x) => x.path === d.path)) {
+              /* 目标已有此文件：只激活，不清 modeHint（store.open 对已有项会无条件覆写） */
+              store.setActive(pkey, d.path);
+            } else {
+              const nf = { path: d.path, name: d.name || d.path };
+              d.modeHint && (nf.modeHint = d.modeHint); /* diff 视图拖拽不丢 */
+              store.open(pkey, nf);
+            }
+            store.close(d.from, d.path);
           } catch (e) {}
         },
       },
@@ -3843,7 +3852,7 @@ function Details(t) {
                 onDragStart: (N) => {
                   (N.dataTransfer.setData(
                     "application/x-geek-preview",
-                    JSON.stringify({ from: pkey, path: i.path, name: i.name }),
+                    JSON.stringify({ from: pkey, path: i.path, name: i.name, modeHint: i.modeHint }),
                   ),
                     (N.dataTransfer.effectAllowed = "move"));
                 },
