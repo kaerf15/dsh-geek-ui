@@ -23,10 +23,12 @@ function ImgZoomView() {
   );
 }
 
-/* 异步回调落地前的活守卫（评审修复）：响应回来时用户可能已切文件/切会话，
- * 比对发起时的 sid+path，不一致就丢弃——否则旧文件的响应写进新文件的视图态 */
+/* 异步回调落地前的活守卫（评审修复）：响应回来时用户可能已切文件，
+ * 比对发起时的 path 是否仍是该会话桶的 active——否则旧文件的响应写进新文件的视图态。
+ * 0.1.5 修订：去掉「sid 必须是当前会话」的联合条件——分栏下两个右栏并存，
+ * 非焦点会话的预览实例是合法存续的；每桶独立 active 已足够防串写。 */
 function detailsAlive(sid, path) {
-  return sessionProbe.sid === sid && store.bucket(sid).active === path;
+  return store.bucket(sid).active === path;
 }
 
 function parseGitDiff(diffText) {
@@ -84,14 +86,18 @@ function Details(t) {
     s = t.layout,
     a = React.useState(0)[1];
   React.useEffect(() => sessionProbe.sub(() => a((i) => i + 1)), []);
-  const sidRef = React.useRef(sessionProbe.sid);
+  /* 0.1.5：预览入驻官方右栏后，槽会把所属会话 sessionId 传进来——绑定它，
+   * 分栏并存的两个右栏各看各的桶，不再同读 sessionProbe 镜像成同一份；
+   * 缺 prop（旧宿主/smoke）回落 sessionProbe.sid，行为同旧版。 */
+  const sid = t.sessionId || sessionProbe.sid;
+  const sidRef = React.useRef(sid);
   React.useEffect(() => {
-    if (sidRef.current !== sessionProbe.sid) {
+    if (sidRef.current !== sid) {
       /* 切会话平台会关 details 列（AppFrame 私有面），缩放态跟着退，别让 fixed 面板悬空 */
-      ((sidRef.current = sessionProbe.sid), setZoomed(!1), a((i) => i + 1));
+      ((sidRef.current = sid), setZoomed(!1), a((i) => i + 1));
     }
   });
-  const l = usePreviewState(sessionProbe.sid),
+  const l = usePreviewState(sid),
     c = l.activeFile,
     u = React.useState(null),
     r = u[0],
@@ -237,7 +243,7 @@ function Details(t) {
         c && loadDiff(c.path);
         return;
       }
-      const sid0 = sessionProbe.sid, path0 = c.path;
+      const sid0 = sid, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
         .then((i2) => {
@@ -265,7 +271,7 @@ function Details(t) {
         b(!1),
         R(!0),
         (() => {
-          const sid0 = sessionProbe.sid, path0 = c.path;
+          const sid0 = sid, path0 = c.path;
           host
             .call("workbench.download", { path: c.path })
             .then((i) => {
@@ -465,7 +471,7 @@ function Details(t) {
                 key: i.path,
                 className: "pw-tab" + (i.path === l.active ? " on" : ""),
                 title: i.path,
-                onClick: () => store.setActive(sessionProbe.sid, i.path),
+                onClick: () => store.setActive(sid, i.path),
               },
               e("span", { className: "pw-tab-icon" }, fileIconEl(i.name, 13)),
               e("span", { className: "pw-tab-name" }, i.name),
@@ -476,7 +482,7 @@ function Details(t) {
                   title: "关闭",
                   onClick: (N) => {
                     (N.stopPropagation(),
-                      store.close(sessionProbe.sid, i.path));
+                      store.close(sid, i.path));
                   },
                 },
                 "×",
@@ -610,7 +616,7 @@ function Details(t) {
                 title: "重新加载文件内容",
                 onClick: () => {
                   if (!c) return;
-                  const sid0 = sessionProbe.sid, path0 = c.path;
+                  const sid0 = sid, path0 = c.path;
                   host
                     .call("workbench.readFile", { path: c.path })
                     .then((i2) => {
@@ -704,7 +710,7 @@ function Details(t) {
                 disabled: saving || draft === ((r && r.text) || ""),
                 onClick: () => {
                   if (saving) return;
-                  const sid0 = sessionProbe.sid, path0 = c.path;
+                  const sid0 = sid, path0 = c.path;
                   (setSaving(!0),
                     host
                       .call("workbench.writeFile", {
