@@ -73,6 +73,12 @@ header[data-dgu-root] > [data-dgu="titlerow"] { display: contents; }
 header[data-dgu-root] [data-slot="conversation.session.header.utilities"] { display: none !important; }
 header[data-dgu-root] div:has(> [data-slot="conversation.session.header.utilities"]) { display: none !important; }
 
+/* 官方预设选择器（agent-preset 座位：图标+预设名+下拉箭头）整颗隐藏。
+ * 定位双条件：actions 槽领头位（order -10 最低者排最前）+ 自身或子级是
+ * 带 aria-haspopup="menu" 的菜单钮——两个特征都中才杀，官方位次调整时宁漏勿误。
+ * 位次契约：ui-agent-preset register order:-10（领头负序带，注释见官方 index.ts）。 */
+header[data-dgu-root] [data-slot="conversation.session.header.actions"] > :first-child:is(button[aria-haspopup="menu"], :has(button[aria-haspopup="menu"])) { display: none !important; }
+
 /* 面包屑：标题按钮与 “/” 分隔符隐藏，只留谱系控件所在的段。
  * 谱系判定的是非空内容（> :not(:empty)）——空壳不算数，否则会留下幽灵格。 */
 header[data-dgu-root] [data-dgu="crumbs"] > span > button,
