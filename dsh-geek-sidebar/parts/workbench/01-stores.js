@@ -206,6 +206,44 @@ const pickNotesDir = () => {
       })
       .catch(() => {});
   };
+/* ===== 分栏支持：预览桶按「会话::tab 实例」分键 =====
+ * 0.1.5 右栏可分栏，同一会话可并存多个预览实例；共用会话桶会镜像成同一份。
+ * occurList 登记存活实例与最近交互时刻；写入路径（树/聊天打开）落在该会话
+ * 最近交互的实例上（同刻取后挂载者）。无存活实例时落会话裸桶（sid 本身），
+ * 首个挂载的空实例收养它——收养即移空，双栏同时挂载不互抢。 */
+const occurList = [];
+function occurAdd(key, sid) {
+  occurRemove(key);
+  occurList.push({ key, sid, touch: 0 });
+}
+function occurRemove(key) {
+  const i = occurList.findIndex((o) => o.key === key);
+  i >= 0 && occurList.splice(i, 1);
+}
+function occurTouch(key) {
+  const o = occurList.find((x) => x.key === key);
+  o && (o.touch = Date.now());
+}
+function occurTarget(sid) {
+  let best = null;
+  for (const o of occurList)
+    if (o.sid === sid && (!best || o.touch >= best.touch)) best = o;
+  return best ? best.key : null;
+}
+/* 预览桶键解析：有存活实例 → 最近交互实例；无 → 会话裸桶（兼容无实例期的写入） */
+function previewKeyFor(sid) {
+  return (sid && occurTarget(sid)) || sid;
+}
+function occurAdopt(key, sid) {
+  occurAdd(key, sid);
+  const mine = store.bucket(key),
+    legacy = sid && store.buckets[sid];
+  if (mine.files.length === 0 && legacy && legacy.files.length > 0) {
+    ((mine.files = legacy.files), (mine.active = legacy.active));
+    ((legacy.files = []), (legacy.active = null));
+    bus.fire();
+  }
+}
 function usePreviewState(t) {
   const s = React.useState(0)[1];
   React.useEffect(() => store.sub(() => s((l) => l + 1)), []);

@@ -90,6 +90,9 @@ function Details(t) {
    * 分栏并存的两个右栏各看各的桶，不再同读 sessionProbe 镜像成同一份；
    * 缺 prop（旧宿主/smoke）回落 sessionProbe.sid，行为同旧版。 */
   const sid = t.sessionId || sessionProbe.sid;
+  /* 分栏实例桶键：右栏槽传入 okey（会话::tab实例），同会话多栏各读各的；
+   * 缺失（旧宿主/smoke）回落会话桶 */
+  const pkey = t.okey || sid;
   const sidRef = React.useRef(sid);
   React.useEffect(() => {
     if (sidRef.current !== sid) {
@@ -97,7 +100,7 @@ function Details(t) {
       ((sidRef.current = sid), setZoomed(!1), a((i) => i + 1));
     }
   });
-  const l = usePreviewState(sid),
+  const l = usePreviewState(pkey),
     c = l.activeFile,
     u = React.useState(null),
     r = u[0],
@@ -243,7 +246,7 @@ function Details(t) {
         c && loadDiff(c.path);
         return;
       }
-      const sid0 = sid, path0 = c.path;
+      const sid0 = pkey, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
         .then((i2) => {
@@ -271,7 +274,7 @@ function Details(t) {
         b(!1),
         R(!0),
         (() => {
-          const sid0 = sid, path0 = c.path;
+          const sid0 = pkey, path0 = c.path;
           host
             .call("workbench.download", { path: c.path })
             .then((i) => {
@@ -471,7 +474,7 @@ function Details(t) {
                 key: i.path,
                 className: "pw-tab" + (i.path === l.active ? " on" : ""),
                 title: i.path,
-                onClick: () => store.setActive(sid, i.path),
+                onClick: () => store.setActive(pkey, i.path),
               },
               e("span", { className: "pw-tab-icon" }, fileIconEl(i.name, 13)),
               e("span", { className: "pw-tab-name" }, i.name),
@@ -482,7 +485,7 @@ function Details(t) {
                   title: "关闭",
                   onClick: (N) => {
                     (N.stopPropagation(),
-                      store.close(sid, i.path));
+                      store.close(pkey, i.path));
                   },
                 },
                 "×",
@@ -616,7 +619,7 @@ function Details(t) {
                 title: "重新加载文件内容",
                 onClick: () => {
                   if (!c) return;
-                  const sid0 = sid, path0 = c.path;
+                  const sid0 = pkey, path0 = c.path;
                   host
                     .call("workbench.readFile", { path: c.path })
                     .then((i2) => {
@@ -710,7 +713,7 @@ function Details(t) {
                 disabled: saving || draft === ((r && r.text) || ""),
                 onClick: () => {
                   if (saving) return;
-                  const sid0 = sid, path0 = c.path;
+                  const sid0 = pkey, path0 = c.path;
                   (setSaving(!0),
                     host
                       .call("workbench.writeFile", {

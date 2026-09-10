@@ -327,6 +327,44 @@ const pickNotesDir = () => {
       })
       .catch(() => {});
   };
+/* ===== 分栏支持：预览桶按「会话::tab 实例」分键 =====
+ * 0.1.5 右栏可分栏，同一会话可并存多个预览实例；共用会话桶会镜像成同一份。
+ * occurList 登记存活实例与最近交互时刻；写入路径（树/聊天打开）落在该会话
+ * 最近交互的实例上（同刻取后挂载者）。无存活实例时落会话裸桶（sid 本身），
+ * 首个挂载的空实例收养它——收养即移空，双栏同时挂载不互抢。 */
+const occurList = [];
+function occurAdd(key, sid) {
+  occurRemove(key);
+  occurList.push({ key, sid, touch: 0 });
+}
+function occurRemove(key) {
+  const i = occurList.findIndex((o) => o.key === key);
+  i >= 0 && occurList.splice(i, 1);
+}
+function occurTouch(key) {
+  const o = occurList.find((x) => x.key === key);
+  o && (o.touch = Date.now());
+}
+function occurTarget(sid) {
+  let best = null;
+  for (const o of occurList)
+    if (o.sid === sid && (!best || o.touch >= best.touch)) best = o;
+  return best ? best.key : null;
+}
+/* 预览桶键解析：有存活实例 → 最近交互实例；无 → 会话裸桶（兼容无实例期的写入） */
+function previewKeyFor(sid) {
+  return (sid && occurTarget(sid)) || sid;
+}
+function occurAdopt(key, sid) {
+  occurAdd(key, sid);
+  const mine = store.bucket(key),
+    legacy = sid && store.buckets[sid];
+  if (mine.files.length === 0 && legacy && legacy.files.length > 0) {
+    ((mine.files = legacy.files), (mine.active = legacy.active));
+    ((legacy.files = []), (legacy.active = null));
+    bus.fire();
+  }
+}
 function usePreviewState(t) {
   const s = React.useState(0)[1];
   React.useEffect(() => store.sub(() => s((l) => l + 1)), []);
@@ -1071,7 +1109,7 @@ function FileBrowser(t) {
         /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
          * 由官方右栏的预览 tab（15d-rightbar-tab）接管渲染并揭示。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }),
+          store.open(previewKeyFor(t.sessionId), { path: i.path, name: i.name }),
           revealPreviewTab());
     },
     z = (i) => {
@@ -1158,10 +1196,10 @@ function FileBrowser(t) {
           (k((S) => dropTreeSubtree(S, i.path)),
             dir && w(dir, !0),
             l && fetchGit(l));
-          const ab = store.bucket(t.sessionId);
+          const ab = store.bucket(previewKeyFor(t.sessionId));
           ab.active &&
             pathHasPrefix(ab.active, i.path) &&
-            store.close(t.sessionId, ab.active);
+            store.close(previewKeyFor(t.sessionId), ab.active);
         })
         .catch((N) => {
           console.error("[dsh-geek-sidebar] delete failed", N);
@@ -1207,10 +1245,10 @@ function FileBrowser(t) {
           srcDir && w(srcDir, true);
           if (m.children[target.path]) w(target.path, true);
           l && fetchGit(l);
-          const ab = store.bucket(t.sessionId);
+          const ab = store.bucket(previewKeyFor(t.sessionId));
           ab.active &&
             pathHasPrefix(ab.active, src.path) &&
-            store.close(t.sessionId, ab.active);
+            store.close(previewKeyFor(t.sessionId), ab.active);
         })
         .catch((err) => {
           console.error("[dsh-geek-sidebar] move failed", err);
@@ -1525,13 +1563,13 @@ function FileBrowser(t) {
                                 key: f.path,
                                 className:
                                   "pw-change-row" +
-                                  (store.bucket(t.sessionId).active === f.path
+                                  (store.bucket(previewKeyFor(t.sessionId)).active === f.path
                                     ? " active"
                                     : ""),
                                 title: f.path,
                                 onClick: () => {
                                   yieldToPreview();
-                                  store.open(t.sessionId, {
+                                  store.open(previewKeyFor(t.sessionId), {
                                     path: f.path,
                                     name: f.name,
                                     modeHint: "diff",
@@ -1589,7 +1627,7 @@ function FileBrowser(t) {
                         dlBusy: R,
                         dlDone: b,
                         onMention: o ? t.onMentionAbs : t.onMention,
-                        activePath: store.bucket(t.sessionId).active,
+                        activePath: store.bucket(previewKeyFor(t.sessionId)).active,
                         onDelete: onDel,
                         gitFiles: gitInfo.files,
                         gitDirs: gitInfo.changedDirs,
@@ -3392,6 +3430,9 @@ function Details(t) {
    * 分栏并存的两个右栏各看各的桶，不再同读 sessionProbe 镜像成同一份；
    * 缺 prop（旧宿主/smoke）回落 sessionProbe.sid，行为同旧版。 */
   const sid = t.sessionId || sessionProbe.sid;
+  /* 分栏实例桶键：右栏槽传入 okey（会话::tab实例），同会话多栏各读各的；
+   * 缺失（旧宿主/smoke）回落会话桶 */
+  const pkey = t.okey || sid;
   const sidRef = React.useRef(sid);
   React.useEffect(() => {
     if (sidRef.current !== sid) {
@@ -3399,7 +3440,7 @@ function Details(t) {
       ((sidRef.current = sid), setZoomed(!1), a((i) => i + 1));
     }
   });
-  const l = usePreviewState(sid),
+  const l = usePreviewState(pkey),
     c = l.activeFile,
     u = React.useState(null),
     r = u[0],
@@ -3545,7 +3586,7 @@ function Details(t) {
         c && loadDiff(c.path);
         return;
       }
-      const sid0 = sid, path0 = c.path;
+      const sid0 = pkey, path0 = c.path;
       host
         .call("workbench.readFile", { path: c.path })
         .then((i2) => {
@@ -3573,7 +3614,7 @@ function Details(t) {
         b(!1),
         R(!0),
         (() => {
-          const sid0 = sid, path0 = c.path;
+          const sid0 = pkey, path0 = c.path;
           host
             .call("workbench.download", { path: c.path })
             .then((i) => {
@@ -3773,7 +3814,7 @@ function Details(t) {
                 key: i.path,
                 className: "pw-tab" + (i.path === l.active ? " on" : ""),
                 title: i.path,
-                onClick: () => store.setActive(sid, i.path),
+                onClick: () => store.setActive(pkey, i.path),
               },
               e("span", { className: "pw-tab-icon" }, fileIconEl(i.name, 13)),
               e("span", { className: "pw-tab-name" }, i.name),
@@ -3784,7 +3825,7 @@ function Details(t) {
                   title: "关闭",
                   onClick: (N) => {
                     (N.stopPropagation(),
-                      store.close(sid, i.path));
+                      store.close(pkey, i.path));
                   },
                 },
                 "×",
@@ -3918,7 +3959,7 @@ function Details(t) {
                 title: "重新加载文件内容",
                 onClick: () => {
                   if (!c) return;
-                  const sid0 = sid, path0 = c.path;
+                  const sid0 = pkey, path0 = c.path;
                   host
                     .call("workbench.readFile", { path: c.path })
                     .then((i2) => {
@@ -4012,7 +4053,7 @@ function Details(t) {
                 disabled: saving || draft === ((r && r.text) || ""),
                 onClick: () => {
                   if (saving) return;
-                  const sid0 = sid, path0 = c.path;
+                  const sid0 = pkey, path0 = c.path;
                   (setSaving(!0),
                     host
                       .call("workbench.writeFile", {
@@ -4073,7 +4114,7 @@ function mediaUrl(s, bd) {
 }
 function openLocalPath(p) {
   try {
-    store.open(sessionProbe.sid, { path: p, name: baseName(p) || p });
+    store.open(previewKeyFor(sessionProbe.sid), { path: p, name: baseName(p) || p });
     revealPreviewTab();
   } catch (e) {}
 }
@@ -6561,8 +6602,38 @@ function revealPreviewTab() {
   } catch (e) {}
 }
 
+/* body 组件：以 useTabInfo 拿到本 tab 实例 id，预览桶按「会话::实例」分键（分栏不镜像）；
+ * 挂载登记 + 收养会话裸桶，卸载注销；栏内按下指针即标记为本会话的写入目标。
+ * useTabInfo 由槽的 hookContext 保证在场（同官方 TextPreview），缺失时回落会话桶。 */
+function GeekPreviewBody(u) {
+  const info = u.useTabInfo ? u.useTabInfo() : null;
+  const sid = u.sessionId || sessionProbe.sid;
+  const okey = info ? sid + "::" + info.tab.id : sid;
+  React.useEffect(() => {
+    occurAdopt(okey, sid);
+    return () => occurRemove(okey);
+  }, [okey, sid]);
+  return React.createElement(
+    "div",
+    { style: { display: "contents" }, onPointerDownCapture: () => occurTouch(okey) },
+    React.createElement(PanelHost, {
+      /* sessionId 透传：slot standardProps 自带，是 dshDetailsPanels 三方面板的
+       * 既有服务面（旧 details 槽经 owner props 传入），不能丢 */
+      sessionId: u.sessionId,
+      okey,
+      layout: GEEK_PREVIEW_DEPS.layout,
+      inDrawer: true,
+      workspacesSvc: GEEK_PREVIEW_DEPS.workspacesSvc,
+      mentionBridge: GEEK_PREVIEW_DEPS.mentionBridge,
+    }),
+  );
+}
+
 /* 注册预览 tab：类型定义 + body。deps 取自 apply 闭包（layout/workspacesSvc/mentionBridge）。
- * body 传 inDrawer=true：栏内模式下 geek 自绘的缩放/收栏钮隐藏，开关交给平台 tab 铬。 */
+ * body 传 inDrawer=true：栏内模式下 geek 自绘的缩放/收栏钮隐藏，开关交给平台 tab 铬。
+ * guide 入口：平台的默认页规则是「全应用只有一个 guide 入口时它成为默认页」——
+ * 官方 files 已被本插件禁用（入口为 0），本入口补位后右栏首开即预览而非「开始」。 */
+const GEEK_PREVIEW_DEPS = {};
 function installRightbarPreview(t, deps) {
   const tabs = t.get("sidebarRightTabs");
   const sbr = t.get("sidebarRight");
@@ -6572,12 +6643,14 @@ function installRightbarPreview(t, deps) {
     return;
   }
   rightbarSvc = sbr;
+  Object.assign(GEEK_PREVIEW_DEPS, deps);
   t.effect(
     () =>
       tabs.register({
         id: GEEK_PREVIEW_TAB_ID,
         kind: GEEK_PREVIEW_TAB_KIND,
         title: () => "预览",
+        guide: [{ order: 10, title: () => "预览", description: () => "工作区文件预览与三方详情面板" }],
       }),
     "geek-sidebar: preview tab type",
   );
@@ -6585,15 +6658,7 @@ function installRightbarPreview(t, deps) {
     () =>
       slots.inject("sidebar.right.pane.tab", () =>
         slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, (u) =>
-          React.createElement(PanelHost, {
-            /* sessionId 透传：slot standardProps 自带，是 dshDetailsPanels 三方面板的
-             * 既有服务面（旧 details 槽经 owner props 传入），不能丢 */
-            sessionId: u.sessionId,
-            layout: deps.layout,
-            inDrawer: true,
-            workspacesSvc: deps.workspacesSvc,
-            mentionBridge: deps.mentionBridge,
-          }),
+          React.createElement(GeekPreviewBody, u),
         ),
       ),
     "geek-sidebar: preview tab body",

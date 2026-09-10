@@ -455,7 +455,7 @@ function FileBrowser(t) {
         /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
          * 由官方右栏的预览 tab（15d-rightbar-tab）接管渲染并揭示。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }),
+          store.open(previewKeyFor(t.sessionId), { path: i.path, name: i.name }),
           revealPreviewTab());
     },
     z = (i) => {
@@ -542,10 +542,10 @@ function FileBrowser(t) {
           (k((S) => dropTreeSubtree(S, i.path)),
             dir && w(dir, !0),
             l && fetchGit(l));
-          const ab = store.bucket(t.sessionId);
+          const ab = store.bucket(previewKeyFor(t.sessionId));
           ab.active &&
             pathHasPrefix(ab.active, i.path) &&
-            store.close(t.sessionId, ab.active);
+            store.close(previewKeyFor(t.sessionId), ab.active);
         })
         .catch((N) => {
           console.error("[dsh-geek-sidebar] delete failed", N);
@@ -591,10 +591,10 @@ function FileBrowser(t) {
           srcDir && w(srcDir, true);
           if (m.children[target.path]) w(target.path, true);
           l && fetchGit(l);
-          const ab = store.bucket(t.sessionId);
+          const ab = store.bucket(previewKeyFor(t.sessionId));
           ab.active &&
             pathHasPrefix(ab.active, src.path) &&
-            store.close(t.sessionId, ab.active);
+            store.close(previewKeyFor(t.sessionId), ab.active);
         })
         .catch((err) => {
           console.error("[dsh-geek-sidebar] move failed", err);
@@ -909,13 +909,13 @@ function FileBrowser(t) {
                                 key: f.path,
                                 className:
                                   "pw-change-row" +
-                                  (store.bucket(t.sessionId).active === f.path
+                                  (store.bucket(previewKeyFor(t.sessionId)).active === f.path
                                     ? " active"
                                     : ""),
                                 title: f.path,
                                 onClick: () => {
                                   yieldToPreview();
-                                  store.open(t.sessionId, {
+                                  store.open(previewKeyFor(t.sessionId), {
                                     path: f.path,
                                     name: f.name,
                                     modeHint: "diff",
@@ -973,7 +973,7 @@ function FileBrowser(t) {
                         dlBusy: R,
                         dlDone: b,
                         onMention: o ? t.onMentionAbs : t.onMention,
-                        activePath: store.bucket(t.sessionId).active,
+                        activePath: store.bucket(previewKeyFor(t.sessionId)).active,
                         onDelete: onDel,
                         gitFiles: gitInfo.files,
                         gitDirs: gitInfo.changedDirs,

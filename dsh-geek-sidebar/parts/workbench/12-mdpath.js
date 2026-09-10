@@ -22,7 +22,7 @@ function mediaUrl(s, bd) {
 }
 function openLocalPath(p) {
   try {
-    store.open(sessionProbe.sid, { path: p, name: baseName(p) || p });
+    store.open(previewKeyFor(sessionProbe.sid), { path: p, name: baseName(p) || p });
     revealPreviewTab();
   } catch (e) {}
 }
