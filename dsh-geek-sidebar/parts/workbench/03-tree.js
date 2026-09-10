@@ -453,9 +453,10 @@ function FileBrowser(t) {
           N && !m.children[i.path] && w(i.path));
       } else
         /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
-         * 由常驻 drawer（13-drawer）接管渲染，无需再通知布局层。 */
+         * 由官方右栏的预览 tab（15d-rightbar-tab）接管渲染并揭示。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }));
+          store.open(t.sessionId, { path: i.path, name: i.name }),
+          revealPreviewTab());
     },
     z = (i) => {
       R ||
@@ -919,6 +920,7 @@ function FileBrowser(t) {
                                     name: f.name,
                                     modeHint: "diff",
                                   });
+                                  revealPreviewTab();
                                 },
                               },
                               e(

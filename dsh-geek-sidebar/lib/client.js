@@ -1069,9 +1069,10 @@ function FileBrowser(t) {
           N && !m.children[i.path] && w(i.path));
       } else
         /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
-         * 由常驻 drawer（13-drawer）接管渲染，无需再通知布局层。 */
+         * 由官方右栏的预览 tab（15d-rightbar-tab）接管渲染并揭示。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }));
+          store.open(t.sessionId, { path: i.path, name: i.name }),
+          revealPreviewTab());
     },
     z = (i) => {
       R ||
@@ -1535,6 +1536,7 @@ function FileBrowser(t) {
                                     name: f.name,
                                     modeHint: "diff",
                                   });
+                                  revealPreviewTab();
                                 },
                               },
                               e(
@@ -4064,44 +4066,8 @@ function mediaUrl(s, bd) {
 function openLocalPath(p) {
   try {
     store.open(sessionProbe.sid, { path: p, name: baseName(p) || p });
+    revealPreviewTab();
   } catch (e) {}
-}
-
-function PreviewDrawer(t) {
-  const e = React.createElement;
-  const [, force] = React.useState(0);
-  React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
-  const st = usePreviewState(sessionProbe.sid);
-  const [hiddenFor, setHiddenFor] = React.useState(null);
-  /* 评审修复：遮罩 dismiss 只压"这一次打开"——文件关掉（activeFile 空）即复位 hiddenFor，
-   * 重开同一文件抽屉能再出场（原版永不重置，同路径关闭再开也被永久压制，无挽回路径） */
-  React.useEffect(() => {
-    !st.activeFile && hiddenFor && setHiddenFor(null);
-  }, [st.activeFile, hiddenFor]);
-  /* 0.1.5：平台 details 栏整个移除（layout.openDetails/closeDetails、'details' 槽均消失），
-   * 本 drawer 从「窄屏顶替」改为「唯一预览宿主」，宽窄屏都出场。
-   * 宿主内容用 PanelHost（dshDetailsPanels 三方驱动面）而非裸 Details，保住该服务面。 */
-  if (!st.activeFile) return null;
-  if (hiddenFor === st.activeFile.path) return null;
-  return e(
-    React.Fragment,
-    null,
-    e("div", {
-      className: "pw-drawer-mask",
-      onClick: () => setHiddenFor(st.activeFile.path),
-    }),
-    e(
-      "div",
-      { className: "pw-drawer-wrap" },
-      e(PanelHost, {
-        layout: t.layout,
-        /* drawer 本来就是宽面板，缩放钮只在栏内模式出场 */
-        inDrawer: !0,
-        workspacesSvc: t.workspacesSvc,
-        mentionBridge: t.mentionBridge,
-      }),
-    ),
-  );
 }
 
 /* 底栏图标：技能（Layers）——FootBar 入口的专属图形 */
@@ -6559,6 +6525,75 @@ function installOpenResourceHook(t) {
   }, "geek-sidebar: openResource hook");
 }
 
+/* ==================== 预览入驻官方右栏（sidebarRight 页面 tab） ====================
+ * 0.1.5 起平台有了完整的右栏 tab 体系（ui-sidebar-right）：右栏展开钮（页头 corner
+ * 槽的 ③）、停靠/拖宽/全屏、每会话独立 surface 全由平台管。本插件的预览从
+ * 「自绘浮层抽屉」改为「右栏页面 tab」：
+ *   - 注册页面类型 geekPreview（无地址认领，openTab(kind) 开）；
+ *   - body 复用现有 PanelHost（读自家 preview store，dshDetailsPanels 三方驱动面不变）；
+ *   - openLocalPath（12-mdpath）打开文件后调 revealPreviewTab() 揭示右栏；
+ *   - 官方右栏展开钮 ③ 天然成为预览的入口/出口。
+ * 钉住的平台私有面（0.1.5-rc.1，升级先核对）：
+ *   - ctx.sidebarRightTabs.register(definition)：{id, kind, title, 无 patterns 即页面型}
+ *   - ctx.sidebarRight.openTab(kind)：揭示栏并把该页 tab 置前（页面型 pane 内去重）
+ *   - body 注册槽 sidebar.right.pane.tab，key = 定义的 id
+ */
+
+const GEEK_PREVIEW_TAB_ID = "dsh-geek-sidebar-preview";
+const GEEK_PREVIEW_TAB_KIND = "geekPreview";
+
+/* apply 时注入的 sidebarRight 服务引用（openLocalPath 揭示用）；缺席 = 平台契约变动 */
+let rightbarSvc = null;
+
+/* 打开文件后揭示右栏预览 tab；服务缺席静默（预览内容仍在 store，栏出现即显示） */
+function revealPreviewTab() {
+  try {
+    if (rightbarSvc) rightbarSvc.openTab(GEEK_PREVIEW_TAB_KIND);
+  } catch (e) {}
+}
+
+/* 注册预览 tab：类型定义 + body。deps 取自 apply 闭包（layout/workspacesSvc/mentionBridge）。
+ * body 传 inDrawer=true：栏内模式下 geek 自绘的缩放/收栏钮隐藏，开关交给平台 tab 铬。 */
+function installRightbarPreview(t, deps) {
+  const tabs = t.get("sidebarRightTabs");
+  const sbr = t.get("sidebarRight");
+  const slots = t.get("slots");
+  if (!tabs || !sbr || !slots) {
+    console.warn("[dsh-geek-sidebar] sidebarRight/sidebarRightTabs 不可读，预览无法入驻右栏（平台契约变动？）");
+    return;
+  }
+  rightbarSvc = sbr;
+  t.effect(
+    () =>
+      tabs.register({
+        id: GEEK_PREVIEW_TAB_ID,
+        kind: GEEK_PREVIEW_TAB_KIND,
+        title: () => "预览",
+      }),
+    "geek-sidebar: preview tab type",
+  );
+  t.effect(
+    () =>
+      slots.inject("sidebar.right.pane.tab", () =>
+        slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, () =>
+          React.createElement(PanelHost, {
+            layout: deps.layout,
+            inDrawer: true,
+            workspacesSvc: deps.workspacesSvc,
+            mentionBridge: deps.mentionBridge,
+          }),
+        ),
+      ),
+    "geek-sidebar: preview tab body",
+  );
+  t.effect(
+    () => () => {
+      rightbarSvc = null;
+    },
+    "geek-sidebar: preview tab cleanup",
+  );
+}
+
 return {
   apply(t) {
     const e = t.get("slots");
@@ -6639,19 +6674,9 @@ return {
       e.inject("shell.overlay", () =>
         e.register({ name: "shell.overlay", id: "workbench-quick-notes" }, () => React.createElement(QuickNotesHost, null)),
       ),
-      e.inject("shell.overlay", () =>
-        e.register(
-          { name: "shell.overlay", id: "workbench-preview-drawer" },
-          (u) =>
-            React.createElement(PreviewDrawer, {
-              layout: s,
-              workspacesSvc: a,
-              mentionBridge: l,
-              /* 框架全局份额：drawer 用它判断官方 details 栏是否被会话门钳 0 */
-              useSessions: u.useSessions,
-            }),
-        ),
-      ));
+      /* 预览入驻官方右栏（15d-rightbar-tab）：自绘浮层抽屉退役，
+       * 预览 tab 由右栏展开钮（页头 corner 槽）统一控制 */
+      installRightbarPreview(t, { layout: s, workspacesSvc: a, mentionBridge: l }));
   },
 };
 

@@ -78,18 +78,8 @@ return {
       e.inject("shell.overlay", () =>
         e.register({ name: "shell.overlay", id: "workbench-quick-notes" }, () => React.createElement(QuickNotesHost, null)),
       ),
-      e.inject("shell.overlay", () =>
-        e.register(
-          { name: "shell.overlay", id: "workbench-preview-drawer" },
-          (u) =>
-            React.createElement(PreviewDrawer, {
-              layout: s,
-              workspacesSvc: a,
-              mentionBridge: l,
-              /* 框架全局份额：drawer 用它判断官方 details 栏是否被会话门钳 0 */
-              useSessions: u.useSessions,
-            }),
-        ),
-      ));
+      /* 预览入驻官方右栏（15d-rightbar-tab）：自绘浮层抽屉退役，
+       * 预览 tab 由右栏展开钮（页头 corner 槽）统一控制 */
+      installRightbarPreview(t, { layout: s, workspacesSvc: a, mentionBridge: l }));
   },
 };
