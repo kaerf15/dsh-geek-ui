@@ -21,12 +21,11 @@ div:has(> [data-slot="sidebar.footer.action"]) { display:contents }
 [data-slot="sidebar.footer.action"] { flex:1 1 100%;order:0;margin:0 4px 4px }
 div:has(> [data-slot="sidebar.settings"]) { order:1;flex:1 1 0;min-width:0 }
 
-/* 设置触发钮：去齿轮——展开态纯文字「设置」，rail 态用「设」单字占位。 */
+/* 设置触发钮：齿轮保留（曾去图标纯文字，用户要求恢复）。rail 态官方只出图标，
+ * 原「设」字占位 hack 同步退役。 */
 [data-slot="sidebar.settings"] button[aria-haspopup="dialog"] { width:100%;height:auto;margin:0;padding:6px 0;justify-content:center;gap:4px;border-radius:7px;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary);white-space:nowrap }
 [data-slot="sidebar.settings"] button[aria-haspopup="dialog"]:hover { background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary) }
-[data-slot="sidebar.settings"] button[aria-haspopup="dialog"] svg { display:none }
 [data-sidebar-collapsed] [data-slot="sidebar.settings"] button[aria-haspopup="dialog"] { width:36px;height:36px;margin:8px 0 10px;justify-content:center;gap:0;padding:0;border-radius:50% }
-[data-sidebar-collapsed] [data-slot="sidebar.settings"] button[aria-haspopup="dialog"]::before { content:"设";font-size:14px;line-height:1 }
 
 /* 会话区与右侧 details 栏之间：只留分隔线，永不显示悬浮拖拽丸 */
 [data-side="details"]:after { display:none !important }
