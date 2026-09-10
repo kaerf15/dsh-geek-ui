@@ -495,18 +495,22 @@ function Details(t) {
             },
             zoomed ? "⤡" : "⤢",
           ),
-      e(
-        "button",
-        {
-          className: "pw-col-btn",
-          title: "收起右栏",
-          /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
-          onClick: () => {
-            (setZoomed(!1), s && s.closeDetails());
-          },
-        },
-        "»",
-      ),
+      /* 0.1.5：closeDetails 随 details 栏一并移除，且预览只剩 drawer 形态——
+       * 「收起右栏」钮不再有可作用的栏，inDrawer 下不出场。 */
+      t.inDrawer
+        ? null
+        : e(
+            "button",
+            {
+              className: "pw-col-btn",
+              title: "收起右栏",
+              /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
+              onClick: () => {
+                (setZoomed(!1), s && typeof s.closeDetails === "function" && s.closeDetails());
+              },
+            },
+            "»",
+          ),
     ),
     c
       ? e(

@@ -60,20 +60,10 @@ return {
             }),
         ),
       ),
-      e.inject("details", () =>
-        /* single 槽 priority 最小者渲染：-0.5 压过官方默认（0），同时输给 dsh-gtm 抽屉（-1，
-           打开才注册）——它开我们让位、它关我们归位。-1 与 0 之间只有小数可用。 */
-        e.register({ name: "details", priority: -0.5 }, (u) =>
-          React.createElement(PanelHost, {
-            sessionId: u.sessionId,
-            layout: s,
-            workspacesSvc: a,
-            mentionBridge: l,
-          }),
-        ),
-      ),
+      /* 0.1.5：'details' 槽已从平台移除（ui-layout 不再声明），此处不再注册 PanelHost；
+       * 预览唯一宿主改为常驻 drawer（13-drawer），dshDetailsPanels 服务面保留不变。 */
       /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
-       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览；修饰键点击
+       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览（drawer）；修饰键点击
        * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
       installDelivChipHook(),
       /* 便签小胶囊引用源通道注册（15-quicknotes）：通过 inputTriggers 注册 @geek-notes-quote 源 */

@@ -452,9 +452,10 @@ function FileBrowser(t) {
         }),
           N && !m.children[i.path] && w(i.path));
       } else
+        /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
+         * 由常驻 drawer（13-drawer）接管渲染，无需再通知布局层。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }),
-          t.layout && t.layout.openDetails());
+          store.open(t.sessionId, { path: i.path, name: i.name }));
     },
     z = (i) => {
       R ||
@@ -918,7 +919,6 @@ function FileBrowser(t) {
                                     name: f.name,
                                     modeHint: "diff",
                                   });
-                                  t.layout && t.layout.openDetails();
                                 },
                               },
                               e(

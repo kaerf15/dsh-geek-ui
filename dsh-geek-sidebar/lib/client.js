@@ -1068,9 +1068,10 @@ function FileBrowser(t) {
         }),
           N && !m.children[i.path] && w(i.path));
       } else
+        /* 0.1.5: 平台 details 栏与 layout.openDetails 已移除——store.open 更新预览态后
+         * 由常驻 drawer（13-drawer）接管渲染，无需再通知布局层。 */
         (yieldToPreview(),
-          store.open(t.sessionId, { path: i.path, name: i.name }),
-          t.layout && t.layout.openDetails());
+          store.open(t.sessionId, { path: i.path, name: i.name }));
     },
     z = (i) => {
       R ||
@@ -1534,7 +1535,6 @@ function FileBrowser(t) {
                                     name: f.name,
                                     modeHint: "diff",
                                   });
-                                  t.layout && t.layout.openDetails();
                                 },
                               },
                               e(
@@ -3795,18 +3795,22 @@ function Details(t) {
             },
             zoomed ? "⤡" : "⤢",
           ),
-      e(
-        "button",
-        {
-          className: "pw-col-btn",
-          title: "收起右栏",
-          /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
-          onClick: () => {
-            (setZoomed(!1), s && s.closeDetails());
-          },
-        },
-        "»",
-      ),
+      /* 0.1.5：closeDetails 随 details 栏一并移除，且预览只剩 drawer 形态——
+       * 「收起右栏」钮不再有可作用的栏，inDrawer 下不出场。 */
+      t.inDrawer
+        ? null
+        : e(
+            "button",
+            {
+              className: "pw-col-btn",
+              title: "收起右栏",
+              /* 缩放态下收栏先退缩放：面板是 fixed，栏收了它还悬着 */
+              onClick: () => {
+                (setZoomed(!1), s && typeof s.closeDetails === "function" && s.closeDetails());
+              },
+            },
+            "»",
+          ),
     ),
     c
       ? e(
@@ -4065,14 +4069,6 @@ function openLocalPath(p) {
 
 function PreviewDrawer(t) {
   const e = React.createElement;
-  const narrow0 = () => window.matchMedia("(max-width:1219px)").matches;
-  const [narrow, setNarrow] = React.useState(narrow0);
-  React.useEffect(() => {
-    const mq = window.matchMedia("(max-width:1219px)");
-    const f = () => setNarrow(mq.matches);
-    mq.addEventListener("change", f);
-    return () => mq.removeEventListener("change", f);
-  }, []);
   const [, force] = React.useState(0);
   React.useEffect(() => bus.sub(() => force((x) => x + 1)), []);
   const st = usePreviewState(sessionProbe.sid);
@@ -4082,20 +4078,9 @@ function PreviewDrawer(t) {
   React.useEffect(() => {
     !st.activeFile && hiddenFor && setHiddenFor(null);
   }, [st.activeFile, hiddenFor]);
-  /* 宽屏下官方 details 栏是否可用：镜像 ui-layout AppFrame 的 detailsSession 门
-   * ——有当前会话且 blank===false 才给列宽，否则钳 0（新建空白会话/无会话时
-   * openDetails 只恢复宽度偏好，拗不过该钳制，预览被压进 0 宽列不可见）。
-   * 平台私有面脆弱点登记：规则跟随 packages/client/ui-layout/src/client/
-   * AppFrame.tsx 的 detailsSession，平台升级先核它。useSessions 缺失（框架
-   * 全局份额未给到 shell.overlay）时退化为旧行为：仅窄屏出场。
-   * 门不可用 → 本 drawer 顶替出场；可用 → 让位回右栏，两者互斥无双重预览。 */
-  const detailsAvailable = t.useSessions
-    ? t.useSessions((s) => {
-        const cur = s.current;
-        return cur !== undefined && s.byId[cur] !== undefined && s.byId[cur].blank === false;
-      })
-    : true;
-  if (!narrow && detailsAvailable) return null;
+  /* 0.1.5：平台 details 栏整个移除（layout.openDetails/closeDetails、'details' 槽均消失），
+   * 本 drawer 从「窄屏顶替」改为「唯一预览宿主」，宽窄屏都出场。
+   * 宿主内容用 PanelHost（dshDetailsPanels 三方驱动面）而非裸 Details，保住该服务面。 */
   if (!st.activeFile) return null;
   if (hiddenFor === st.activeFile.path) return null;
   return e(
@@ -4108,11 +4093,9 @@ function PreviewDrawer(t) {
     e(
       "div",
       { className: "pw-drawer-wrap" },
-      e(Details, {
-        /* 评审修复：删掉 sessionId 死 prop——Details 只读 sessionProbe.sid，从不消费该 prop。
-         *（16-apply 的 PanelHost 仍保留 sessionId：那是 dshDetailsPanels 三方驱动的服务面，非 Details 私有） */
+      e(PanelHost, {
         layout: t.layout,
-        /* drawer 本来就是宽面板，缩放钮只在右栏模式出场 */
+        /* drawer 本来就是宽面板，缩放钮只在栏内模式出场 */
         inDrawer: !0,
         workspacesSvc: t.workspacesSvc,
         mentionBridge: t.mentionBridge,
@@ -6554,20 +6537,10 @@ return {
             }),
         ),
       ),
-      e.inject("details", () =>
-        /* single 槽 priority 最小者渲染：-0.5 压过官方默认（0），同时输给 dsh-gtm 抽屉（-1，
-           打开才注册）——它开我们让位、它关我们归位。-1 与 0 之间只有小数可用。 */
-        e.register({ name: "details", priority: -0.5 }, (u) =>
-          React.createElement(PanelHost, {
-            sessionId: u.sessionId,
-            layout: s,
-            workspacesSvc: a,
-            mentionBridge: l,
-          }),
-        ),
-      ),
+      /* 0.1.5：'details' 槽已从平台移除（ui-layout 不再声明），此处不再注册 PanelHost；
+       * 预览唯一宿主改为常驻 drawer（13-drawer），dshDetailsPanels 服务面保留不变。 */
       /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
-       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览；修饰键点击
+       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览（drawer）；修饰键点击
        * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
       installDelivChipHook(),
       /* 便签小胶囊引用源通道注册（15-quicknotes）：通过 inputTriggers 注册 @geek-notes-quote 源 */
