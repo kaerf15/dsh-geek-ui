@@ -1,3 +1,8 @@
 - insert:
     - id: dsh-geek-sidebar
       name: dsh-geek-sidebar
+# 0.1.5：禁用官方右侧栏「文件」tab——文件树/预览由本插件左侧栏全量接管，
+# 右栏不再出文件列表。写在 bundle 补丁而非 profile 补丁层：插件卸载时
+# 此禁用随之消失，官方 tab 自动恢复。
+- id: ui-sidebar-files
+  disabled: true
