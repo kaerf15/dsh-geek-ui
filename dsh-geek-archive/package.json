@@ -1,6 +1,6 @@
 {
   "name": "dsh-geek-archive",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "license": "MIT",
   "description": "归档会话管理：在设置面板加一节「归档管理」，列出已归档会话，可放回对话或永久删除，补上 DSH 缺失的归档反向操作。",
   "keywords": [
@@ -26,7 +26,7 @@
     "./package.json": "./package.json"
   },
   "dsh": {
-    "verifiedWith": "0.1.2-rc.1",
+    "verifiedWith": "0.1.5-rc.1",
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

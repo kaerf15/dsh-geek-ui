@@ -2,7 +2,7 @@
 
 > DeepSeek Harness Web 工作台的极客增强组件：**页头重排 + 极客侧栏 + 归档管理**，三个让 dsh web 好用到离不开的静态 bundle。
 
-![npm](https://img.shields.io/npm/v/dsh-geek-header?label=dsh-geek-header&logo=npm) ![npm](https://img.shields.io/npm/v/dsh-geek-sidebar?label=dsh-geek-sidebar&logo=npm) ![npm](https://img.shields.io/npm/v/dsh-geek-archive?label=dsh-geek-archive&logo=npm) ![dsh](https://img.shields.io/badge/verifiedWith-0.1.2--rc.1-8A2BE2) ![license](https://img.shields.io/badge/license-MIT-green)
+![npm](https://img.shields.io/npm/v/dsh-geek-header?label=dsh-geek-header&logo=npm) ![npm](https://img.shields.io/npm/v/dsh-geek-sidebar?label=dsh-geek-sidebar&logo=npm) ![npm](https://img.shields.io/npm/v/dsh-geek-archive?label=dsh-geek-archive&logo=npm) ![dsh](https://img.shields.io/badge/verifiedWith-0.1.5--rc.1-8A2BE2) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## 这是什么
 
@@ -10,9 +10,9 @@ dsh web 官方工作台够用但偏"素"：侧栏只有会话列表、页头按�
 
 | bundle | 版本 | 一句话 |
 |--------|------|--------|
-| [dsh-geek-sidebar](dsh-geek-sidebar/) | v2.0.5 | 工作台侧栏 + 文件管理器/预览 + 便签与划选引用 + 技能管理 + @文件提及桥 |
-| [dsh-geek-header](dsh-geek-header/) | v0.4.7 | 页头重排分段条 + 第三方插件区 + 生成标题 + 系统提示词查看 |
-| [dsh-geek-archive](dsh-geek-archive/) | v1.2.0 | 已归档会话「放回对话 / 永久删除」，补上平台缺失的反向操作 |
+| [dsh-geek-sidebar](dsh-geek-sidebar/) | v2.1.0 | 工作台侧栏 + 文件管理器/预览 + 便签与划选引用 + 技能管理 + @文件提及桥 |
+| [dsh-geek-header](dsh-geek-header/) | v0.5.0 | 页头重排分段条 + 第三方插件区 + 生成标题 + 系统提示词查看 |
+| [dsh-geek-archive](dsh-geek-archive/) | v1.2.1 | 已归档会话「放回对话 / 永久删除」，补上平台缺失的反向操作 |
 
 ## 安装
 
@@ -23,6 +23,9 @@ dsh plugin --profile web add dsh-geek-archive   # 可选
 ```
 
 自定义了 profile 名就把 `web` 换成你的。装完刷新浏览器即可，无需改任何配置。
+
+> **⚠ 平台版本要求：dsh ≥ 0.1.5-rc.1，与 0.1.2 及更早版本不兼容。**
+> 本轮是跟随平台 0.1.5 的側边栏大改：预览从旧版依赖的 details 栏（平台已移除）迁入官方右栏 tab 体系，页头适配 0.1.5 新盒模型与新增的 corner 槽。仍在 0.1.2 的用户请装旧版（sidebar v2.0.5 / header v0.4.7 / archive v1.2.0）。
 
 ---
 
@@ -42,7 +45,7 @@ dsh plugin --profile web add dsh-geek-archive   # 可选
 
 ### 3. 文件管理器与预览
 
-侧栏下半区是完整的文件树：上传、下载打包、搜索、两击确认删除都有；chat 里的产出 chip 和工具卡文件链接点击不再跳浏览器，直接在应用内右侧面板打开预览。Markdown 有 Source / Preview / Diff 三态，代码高亮、CSV 表格、图片缩放齐全，改完点"确定保存"才落盘，不点头也不担心误存。
+侧栏下半区是完整的文件树：上传、下载打包、搜索、两击确认删除都有；chat 里的产出 chip 和工具卡文件链接点击不跳外部应用，直接在官方右侧栏的「预览」页打开（页头 ③ 展开钮即预览入口）。Markdown 有 Source / Preview / Diff 三态，代码高亮、CSV 表格、图片缩放齐全，改完点“确定保存”才落盘，不点头也不担心误存。右栏**分栏后每栏预览独立**，可同时对照两个文件；**文件 tab 可跨栏拖拽移动**（0.1.5 新增）。
 
 ![文件预览与编辑](screenshots/file-preview.png)
 
@@ -66,7 +69,7 @@ dsh plugin --profile web add dsh-geek-archive   # 可选
 
 ---
 
-## dsh-geek-header · 页头重排（v0.4.7）
+## dsh-geek-header · 页头重排（v0.5.0）
 
 第一行第三方插件区（`geekUiHeader` 服务），第二行收纳页签/谱系/动作平铺成统一分段条，面包屑文字与 Session log 隐藏，拥挤时动作折叠进 ⋯ 菜单；「生成标题」读整段对话、用你当前选中的模型生成会话标题；「系统提示词」展开查看当前生效的完整 system 字段（会话流内对应行已隐藏）。
 
@@ -83,7 +86,7 @@ dsh plugin --profile web add dsh-geek-archive   # 可选
 
 布局细节与第三方接入方式见 [dsh-geek-header/README.md](dsh-geek-header/README.md)。
 
-## dsh-geek-archive · 归档管理（v1.2.0）
+## dsh-geek-archive · 归档管理（v1.2.1）
 
 dsh 官方的归档是单向门——归档了就再也回不来。这个插件在设置面板加一节「归档管理」（导航末位，归档盒图标），列出全部已归档会话，每条两个按钮：**放回对话**（解除归档回到列表）和**删除**（解除归档 + 删落盘目录 + 通知客户端剔除，两次点击确认）。host 端经 workspace registry 私有方法读写归档集合，改动由平台 WorkspaceFeed 自动推帧，前端零刷新。
 
@@ -103,7 +106,7 @@ dsh-geek-ui/
 └── screenshots/             # 本文实拍图
 ```
 
-三个包均为自包含静态 bundle：host 半只挂 `/__dsh-<name>__/` 前缀的 HTTP 路由，client 半经 `window.__ModuleLoader__` 直发浏览器，无打包器、无构建产物依赖。均标注 `dsh.verifiedWith: 0.1.2-rc.1`，脆弱点（私有面、DOM 结构依赖）在各自源码注释中登记。
+三个包均为自包含静态 bundle：host 半只挂 `/__dsh-<name>__/` 前缀的 HTTP 路由，client 半经 `window.__ModuleLoader__` 直发浏览器，无打包器、无构建产物依赖。均标注 `dsh.verifiedWith: 0.1.5-rc.1`，脆弱点（私有面、DOM 结构依赖）在各自源码注释中登记。
 
 ## 开发
 
