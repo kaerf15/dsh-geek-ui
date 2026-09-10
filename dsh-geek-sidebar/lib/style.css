@@ -25,6 +25,8 @@ div:has(> [data-slot="sidebar.settings"]) { order:1;flex:1 1 0;min-width:0 }
  * 原「设」字占位 hack 同步退役。 */
 [data-slot="sidebar.settings"] button[aria-haspopup="dialog"] { width:100%;height:auto;margin:0;padding:6px 0;justify-content:center;gap:4px;border-radius:7px;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary);white-space:nowrap }
 [data-slot="sidebar.settings"] button[aria-haspopup="dialog"]:hover { background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary) }
+/* 齿轮压到 12px，与右侧技能/便签入口图标同尺寸（官方默认 16px 偏大） */
+[data-slot="sidebar.settings"] button[aria-haspopup="dialog"] svg { width:12px;height:12px }
 [data-sidebar-collapsed] [data-slot="sidebar.settings"] button[aria-haspopup="dialog"] { width:36px;height:36px;margin:8px 0 10px;justify-content:center;gap:0;padding:0;border-radius:50% }
 
 /* 会话区与右侧 details 栏之间：只留分隔线，永不显示悬浮拖拽丸 */
