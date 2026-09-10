@@ -85,6 +85,31 @@ header[data-dgu-root] [data-sidebar-right-expand] svg,
  * 位次契约：ui-agent-preset register order:-10（领头负序带，注释见官方 index.ts）。 */
 header[data-dgu-root] [data-slot="conversation.session.header.actions"] > :first-child:is(button[aria-haspopup="menu"], :has(button[aria-haspopup="menu"])) { display: none !important; }
 
+/* 右栏展开钮（0.1.5 新增的 corner 槽，官方页头末项）：geek 布局下 titlerow
+ * display:contents 把它提为 header 直接 flex 项，无 order 会按 0 沉到行首——
+ * 钉到条带右端（order 最大 + margin-left:auto 推到视口右缘），并套格子骨架。
+ * 空时官方 .headerCorner:empty 已隐藏（右栏展开中 ExpandButton 返回 null）。 */
+header[data-dgu-root] [data-conversation-header-corner] {
+  order: 6;
+  margin-left: auto;
+  margin-right: -20px; /* 抵消 header 右侧 20px 呼吸，贴齐视口右缘（与官方 -16px 同理） */
+  align-items: stretch;
+  height: 36px;
+}
+header[data-dgu-root]:has(> .dgu-row1:not(:empty)) [data-conversation-header-corner] { margin-top: -1px; }
+header[data-dgu-root] [data-conversation-header-corner] button {
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-bottom: none;
+  border-radius: 0;
+  background: transparent;
+  margin: 0;
+}
+header[data-dgu-root] [data-conversation-header-corner] button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 /* 面包屑：标题按钮与 “/” 分隔符隐藏，只留谱系控件所在的段。
  * 谱系判定的是非空内容（> :not(:empty)）——空壳不算数，否则会留下幽灵格。 */
 header[data-dgu-root] [data-dgu="crumbs"] > span > button,
