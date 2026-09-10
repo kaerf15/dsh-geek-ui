@@ -61,10 +61,12 @@ return {
         ),
       ),
       /* 0.1.5：'details' 槽已从平台移除（ui-layout 不再声明），此处不再注册 PanelHost；
-       * 预览唯一宿主改为常驻 drawer（13-drawer），dshDetailsPanels 服务面保留不变。 */
-      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
-       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览（drawer）；修饰键点击
-       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
+       * 预览唯一宿主改为官方右栏的页面 tab（15d-rightbar-tab），dshDetailsPanels 服务面不变。 */
+      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：capture 拦普通左键
+       * 改道应用内预览（右栏 geekPreview tab）；修饰键点击
+       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。
+       * 注：0.1.5 平台 openFile 已改走 sidebarRight.openResource（右栏预览）而非外部打开，
+       * 本拦截继续生效：capture 阶段截住点击，官方处理器根本收不到。 */
       installDelivChipHook(),
       /* 漏网文件打开接管（15c-open-resource）：包 sidebarRight.openResource，
        * capture 点击拦不住的键盘/程序化路径也改道自家预览 */

@@ -314,11 +314,7 @@ div:has(> [data-slot="sidebar.settings"]) { order:1;flex:1 1 0;min-width:0 }
 .pw-tok-s { color:#1a7f37}
 .pw-tok-c { color:#8b96a5;font-style:italic}
 .pw-tok-n { color:#0550ae}
-
-/* 窄窗口预览抽屉（视口 <1220px 时外壳隐藏 details 栏，用抽屉展示） */
-.pw-drawer-mask { position:fixed;inset:0;z-index:18;background:rgba(0,0,0,.18) }
-.pw-drawer-wrap { position:fixed;top:0;right:0;bottom:0;width:min(520px,94vw);z-index:19;background:var(--dsw-alias-bg-base);border-left:1px solid var(--dsw-alias-border-l2);box-shadow:-8px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column }
-.pw-drawer-wrap .pw-details { width:100%;height:100% }
+/*（0.1.5 起预览入驻官方右栏 tab，浮层抽屉已退役，原 .pw-drawer-* 规则删除） */
 
 /* 图片点击放大（md 内嵌图与图片预览共用）：遮罩淡入 + 图片 pop 跳出 */
 .pw-md img, .pw-img-wrap img { cursor:zoom-in}

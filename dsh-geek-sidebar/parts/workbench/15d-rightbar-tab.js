@@ -48,8 +48,11 @@ function installRightbarPreview(t, deps) {
   t.effect(
     () =>
       slots.inject("sidebar.right.pane.tab", () =>
-        slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, () =>
+        slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, (u) =>
           React.createElement(PanelHost, {
+            /* sessionId 透传：slot standardProps 自带，是 dshDetailsPanels 三方面板的
+             * 既有服务面（旧 details 槽经 owner props 传入），不能丢 */
+            sessionId: u.sessionId,
             layout: deps.layout,
             inDrawer: true,
             workspacesSvc: deps.workspacesSvc,

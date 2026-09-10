@@ -63,6 +63,7 @@ function installOpenResourceHook(t) {
         return orig.call(this, address, options);
       }
       if (!f.path) return orig.call(this, address, options);
+      /* 已知舍弃：options.params.line 行号定位——自家预览不支持跳行，接管后丢失 */
       /* 与 15-deliv 同纪律：先请栏内占用者退场，再进自家预览 */
       yieldToPreview();
       openLocalPath(f.path);

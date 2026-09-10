@@ -3797,8 +3797,10 @@ function Details(t) {
             },
             zoomed ? "⤡" : "⤢",
           ),
-      /* 0.1.5：closeDetails 随 details 栏一并移除，且预览只剩 drawer 形态——
-       * 「收起右栏」钮不再有可作用的栏，inDrawer 下不出场。 */
+      /* 0.1.5：closeDetails 随 details 栏一并移除，预览改为右栏页面 tab（15d）——
+       * 「收起右栏」钮不再有可作用的栏（栏的开关归平台 tab 铬），inDrawer 下不出场。
+       * 注意：inDrawer 恒为 true 后，上方缩放钮与本品在生产均不可达，代码暂留供
+       * smoke 覆盖非 drawer 分支；若确认不再需要可连 zoom 机械整体拆除。 */
       t.inDrawer
         ? null
         : e(
@@ -6506,6 +6508,7 @@ function installOpenResourceHook(t) {
         return orig.call(this, address, options);
       }
       if (!f.path) return orig.call(this, address, options);
+      /* 已知舍弃：options.params.line 行号定位——自家预览不支持跳行，接管后丢失 */
       /* 与 15-deliv 同纪律：先请栏内占用者退场，再进自家预览 */
       yieldToPreview();
       openLocalPath(f.path);
@@ -6575,8 +6578,11 @@ function installRightbarPreview(t, deps) {
   t.effect(
     () =>
       slots.inject("sidebar.right.pane.tab", () =>
-        slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, () =>
+        slots.register({ name: "sidebar.right.pane.tab", key: GEEK_PREVIEW_TAB_ID }, (u) =>
           React.createElement(PanelHost, {
+            /* sessionId 透传：slot standardProps 自带，是 dshDetailsPanels 三方面板的
+             * 既有服务面（旧 details 槽经 owner props 传入），不能丢 */
+            sessionId: u.sessionId,
             layout: deps.layout,
             inDrawer: true,
             workspacesSvc: deps.workspacesSvc,
@@ -6657,10 +6663,12 @@ return {
         ),
       ),
       /* 0.1.5：'details' 槽已从平台移除（ui-layout 不再声明），此处不再注册 PanelHost；
-       * 预览唯一宿主改为常驻 drawer（13-drawer），dshDetailsPanels 服务面保留不变。 */
-      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：平台 openFile 走
-       * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览（drawer）；修饰键点击
-       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
+       * 预览唯一宿主改为官方右栏的页面 tab（15d-rightbar-tab），dshDetailsPanels 服务面不变。 */
+      /* chat 产出文件 chip / 工具卡文件链接点击接管（15-deliv）：capture 拦普通左键
+       * 改道应用内预览（右栏 geekPreview tab）；修饰键点击
+       * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。
+       * 注：0.1.5 平台 openFile 已改走 sidebarRight.openResource（右栏预览）而非外部打开，
+       * 本拦截继续生效：capture 阶段截住点击，官方处理器根本收不到。 */
       installDelivChipHook(),
       /* 漏网文件打开接管（15c-open-resource）：包 sidebarRight.openResource，
        * capture 点击拦不住的键盘/程序化路径也改道自家预览 */

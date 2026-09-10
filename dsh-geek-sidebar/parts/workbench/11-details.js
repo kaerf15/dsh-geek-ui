@@ -495,8 +495,10 @@ function Details(t) {
             },
             zoomed ? "⤡" : "⤢",
           ),
-      /* 0.1.5：closeDetails 随 details 栏一并移除，且预览只剩 drawer 形态——
-       * 「收起右栏」钮不再有可作用的栏，inDrawer 下不出场。 */
+      /* 0.1.5：closeDetails 随 details 栏一并移除，预览改为右栏页面 tab（15d）——
+       * 「收起右栏」钮不再有可作用的栏（栏的开关归平台 tab 铬），inDrawer 下不出场。
+       * 注意：inDrawer 恒为 true 后，上方缩放钮与本品在生产均不可达，代码暂留供
+       * smoke 覆盖非 drawer 分支；若确认不再需要可连 zoom 机械整体拆除。 */
       t.inDrawer
         ? null
         : e(
