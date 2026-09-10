@@ -66,6 +66,9 @@ return {
        * 系统默认应用（外部打开），capture 拦普通左键改道应用内预览（drawer）；修饰键点击
        * 保留系统打开。cwd 跟踪在 09-sidebar 的会话订阅效应（sessionCwd）。 */
       installDelivChipHook(),
+      /* 漏网文件打开接管（15c-open-resource）：包 sidebarRight.openResource，
+       * capture 点击拦不住的键盘/程序化路径也改道自家预览 */
+      installOpenResourceHook(t),
       /* 便签小胶囊引用源通道注册（15-quicknotes）：通过 inputTriggers 注册 @geek-notes-quote 源 */
       installQnQuote(t),
       /* DirPicker 单实例宿主：多处路径选择（项目/笔记/便签）共用的应用内目录选择模态 */
