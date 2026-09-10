@@ -54,6 +54,21 @@ check('index.js 在线会话解析复用', host.includes('resolveOnlineSession')
 check('index.js pi-web 原版指令', host.includes('Create a concise title for this session based on the conversation above.'))
 check('index.js 整段对话采集', host.includes("ev.type === 'assistant/message'"))
 check('v0.4.5：事件读取走 snapshotEvents（alpha.4 移除 Session.events getter）', host.includes('session.snapshotEvents()') && !host.includes('session.events'))
+check('v0.5.0：system 改读 system/message 事件（0.1.5 EpochHeader 无 system 字段）', host.includes("system/message"))
+
+/* 行为级：readSystemPrompt 对假会话的读取语义（0.1.5 存储模型） */
+const rspSrc = host.match(/function readSystemPrompt\(session\) \{[\s\S]*?\n\}/)
+check('readSystemPrompt 可提取', !!rspSrc)
+if (rspSrc) {
+  const readSystemPrompt = new Function(rspSrc[0] + '; return readSystemPrompt')()
+  const fake = (events) => ({ snapshotEvents: () => events })
+  const sysEv = (text) => ({ type: 'system/message', data: { message: { content: [{ type: 'text', text }] } } })
+  check('行为：空文本节点 → 空串', readSystemPrompt(fake([sysEv('')])) === '')
+  check('行为：空节点跳过、取第一个非空', readSystemPrompt(fake([sysEv(''), sysEv('PROMPT-B')])) === 'PROMPT-B')
+  check('行为：无 system/message → 空串', readSystemPrompt(fake([{ type: 'user/message', data: {} }])) === '')
+  check('行为：多块文本拼接', readSystemPrompt(fake([{ type: 'system/message', data: { message: { content: [{ type: 'text', text: 'A' }, { type: 'image' }, { type: 'text', text: 'B' }] } } }])) === 'AB')
+  check('行为：snapshotEvents 抛错静默回落', readSystemPrompt({ snapshotEvents: () => { throw new Error('x') } }) === '')
+}
 
 /* 语法可解析（client.js 是浏览器代码，--check 只解析不执行） */
 try {
