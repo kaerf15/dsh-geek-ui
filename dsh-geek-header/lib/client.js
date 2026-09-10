@@ -50,18 +50,19 @@ window.__ModuleLoader__.load({
 /* ===== dsh-geek-header：会话页头重排 ===== */
 
 /* 容器：flex 换行，第一行插件区 / 第二行分段条。上下 padding 归零、左 padding 归零
- * （分段条顶到列左缘），右侧留 20px 呼吸。官方 border-bottom 是透明占位，宽度清零，
- * 否则 header 盒子比格子多 0.56px，底线 ::after 会悬在格子底边上方 1px（竖线出头）。 */
+ * （分段条顶到列左缘），右侧留 20px 呼吸。
+ * 0.1.5 修订：官方 .header 是 min-height:76px + padding-top:10px + border-bottom
+ * 实线（0.1.2 的「透明占位 border + ::after 线」结构已不存在）——min-height 不归零，
+ * 36px 条带会被 76px 最小高悬空；官方底线直接留用，不再压 border、也不再画 ::after
+ *（0.1.5 的 header 压根没有 ::after，画了也无形）。 */
 header[data-dgu-root] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   column-gap: 0;
+  min-height: 0;
   padding: 0 20px 0 0;
-  border-bottom-width: 0;
 }
-/* 底部通栏分隔线：贴合格子底边（bottom:0 → 占据格子最后 1px，竖线恰好止于线的下缘） */
-header[data-dgu-root]::after { bottom: 0; }
 
 /* 官方中间层透明化，titleCluster 提升为 header 的直接 flex 项 */
 header[data-dgu-root] > [data-dgu="titlerow"] { display: contents; }
