@@ -461,7 +461,26 @@ function Details(t) {
       : null,
     e(
       "div",
-      { className: "pw-details" + (zoomed ? " zoomed" : ""), ref: rootRef },
+      {
+        className: "pw-details" + (zoomed ? " zoomed" : ""),
+        ref: rootRef,
+        /* 跨实例文件拖拽的落点：拖另一个预览栏的文件 tab 进来 = 移动（源桶关、本桶开）。
+         * dragover 期只能读 types 不能读 data（浏览器保护），用自有 mime 门控。 */
+        onDragOver: (N) => {
+          N.dataTransfer.types.includes("application/x-geek-preview") &&
+            (N.preventDefault(), (N.dataTransfer.dropEffect = "move"));
+        },
+        onDrop: (N) => {
+          const raw = N.dataTransfer.getData("application/x-geek-preview");
+          if (!raw) return;
+          N.preventDefault();
+          try {
+            const d = JSON.parse(raw);
+            d.from !== pkey && d.path &&
+              (store.close(d.from, d.path), store.open(pkey, { path: d.path, name: d.name || d.path }));
+          } catch (e) {}
+        },
+      },
     e(
       "div",
       { className: "pw-tabs" },
@@ -474,6 +493,15 @@ function Details(t) {
                 key: i.path,
                 className: "pw-tab" + (i.path === l.active ? " on" : ""),
                 title: i.path,
+                /* 可拖：拖到另一个预览栏（分栏/另一会话的右栏）即移动过去 */
+                draggable: !0,
+                onDragStart: (N) => {
+                  (N.dataTransfer.setData(
+                    "application/x-geek-preview",
+                    JSON.stringify({ from: pkey, path: i.path, name: i.name }),
+                  ),
+                    (N.dataTransfer.effectAllowed = "move"));
+                },
                 onClick: () => store.setActive(pkey, i.path),
               },
               e("span", { className: "pw-tab-icon" }, fileIconEl(i.name, 13)),
