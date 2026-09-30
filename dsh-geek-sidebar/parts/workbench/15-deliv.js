@@ -3,8 +3,8 @@
  * 宿主原生 open（系统默认应用，即"外部打开"）。这里在 document capture 阶段拦
  * 普通左键改道应用内预览（delivOpenFile → openLocalPath）；修饰键点击保留系统
  * 打开。（v1.22.0 起：产物/链接弹出面板与事件窗口订阅整体移除，仅保留本接管。）
- *   ① 产出文件 chip（ui-deliverables ProducedFiles.tsx）：行容器自带
- *      data-produced-files-row，chip 为 button[title=完整路径]；
+ *   ① 产出文件 chip（ui-deliverables）：行容器自带
+ *      data-presented-files-row，chip 为 button[title=完整路径]；
  *      「在文件夹中显示」钮 openFile('.') 无 title 属性，自然放行。
  *   ② 工具卡文件链接（ui-tool ToolRow.tsx，read/write/edit 行）：摘要按钮产物类名
  *      形如 "o3BgMG_fileLink"（vite CSS Modules <hash>_<local>，fileLink 子段健在），
@@ -16,7 +16,8 @@
  *
  * 钉住的平台私有面（0.1.2-alpha.4，平台升级先核对）：
  *   - chat openFile→openWorkspacePath 外部打开语义（ui-chat apply.ts）
- *   - ProducedFiles 行容器属性 data-produced-files-row + chip button[title=完整路径]
+ *   - 交付行容器属性 data-presented-files-row + chip button[title=完整路径]
+ *     （0.2.0 起由 data-produced-files-row 改名；按钮 title 仍是解析后的完整路径）
  *   - ToolRow 行根 data-variant + 摘要按钮产物类名含 fileLink 子段 + 摘要文本 =
  *     relativizeToCwd + abbreviateHomePath 语义
  *   - React 17+ 根容器事件委托（document capture 先于根委托）
@@ -37,7 +38,7 @@ function delivOpenFile(cwd, p) {
   openLocalPath(delivAbsPath(cwd, p));
 }
 
-const DELIV_CHIP_SEL = "div[data-produced-files-row] button[title]";
+const DELIV_CHIP_SEL = "div[data-presented-files-row] button[title]";
 const DELIV_TOOL_LINK_SEL = 'div[data-variant] [class*="fileLink"]';
 function delivChipHook(ev) {
   if (ev.defaultPrevented || ev.button !== 0) return;

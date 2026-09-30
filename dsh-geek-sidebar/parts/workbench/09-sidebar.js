@@ -1,3 +1,16 @@
+/* 同一次点击里 openSession 会同步触发列表刷新，刷新若再进来就会打转。闸住重入。 */
+let sessionOpenGate = false;
+function openMainSession(nav, id) {
+  if (sessionOpenGate || !nav || typeof nav.openSession !== "function" || !id) return;
+  sessionOpenGate = true;
+  try {
+    nav.openSession(id);
+  } finally {
+    setTimeout(() => {
+      sessionOpenGate = false;
+    }, 0);
+  }
+}
 function Sidebar(t) {
   const e = React.createElement,
     s = t.layout,
@@ -9,6 +22,8 @@ function Sidebar(t) {
     u = useFilesTab(),
     r = t.useSessions((n) => n.ids),
     m = t.useSessions((n) => n.byId),
+    /* 0.2.0：list.current 恒为 undefined。不要改从 retainedBy 派生——
+     * 打开会话后那次派生会和目录同步搅在一起把页面打转。选中只走 openSession。 */
     k = t.useSessions((n) => n.current),
     h = t.useWorkspaces((n) => n.items),
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
@@ -74,13 +89,11 @@ function Sidebar(t) {
       return f && !ye[n] && f.origin !== "subagent";
     }),
     Z = k ? m[k] : void 0,
-    Se = React.useRef(null),
     lastSynced = React.useRef({ sid: null, cwd: null });
   React.useEffect(() => {
-    /* 会话工作目录同步保护：
-     * 1. 当处于有效会话且该会话有 cwd 时：若会话变更 (k 变化) 或该会话 cwd 异步到齐，严格同步为当前会话所在目录；
-     *    利用 lastSynced 记录已同步状态，避免用户手动在下拉菜单切目录时被微任务中的旧 cwd 抢占回弹；
-     * 2. 只有在平台确实没有任何活跃会话且 p 尚未初始化时，才安全回退到最近或首个工作区，绝不产生竞态覆盖。 */
+    /* 会话工作目录同步：主视图会话有 cwd 时跟上它。
+     * 0.2 不再在切走时 archive 空白会话——平台自己回收 blank，客户端再 archive
+     * 会和 mainView 引用对打，打开会话后渲染死循环。 */
     const curCwd = Z && Z.cwd;
     if (curCwd) {
       if (lastSynced.current.sid !== k || lastSynced.current.cwd !== curCwd) {
@@ -90,11 +103,6 @@ function Sidebar(t) {
     } else if (!p) {
       const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
       if (n && n.path) C(n.path);
-    }
-    const n = Se.current;
-    if (((Se.current = k || null), n && n !== k && a)) {
-      const f = m[n];
-      f && f.blank === !0 && a.archiveSession(n).catch(() => {});
     }
   }, [k, Z && Z.cwd, h, g]);
   const oe = (n) => {
@@ -267,8 +275,9 @@ function Sidebar(t) {
         (d, W) => (m[W].updatedAt || 0) - (m[d].updatedAt || 0),
       )[0];
       /* 评审修复：返回是否命中，无匹配会话时调用方落到 _e 连接目标工作区 */
-      if (!f || !o) return false;
-      o.open(f);
+      /* 0.2.0：sessions.open 已移除，打开主视图走 uiWorkspace.openSession */
+      if (!f) return false;
+      openMainSession(nav, f);
       return true;
     },
     $e = (n) => {
@@ -548,6 +557,7 @@ function Sidebar(t) {
                 sm: f,
                 active: n === k,
                 sessionsSvc: o,
+                openSession: (id) => openMainSession(nav, id),
                 workspacesSvc: a,
                 branch:
                   (ee(f.cwd) !== f.cwd && R[f.cwd] && R[f.cwd].branch) || null,

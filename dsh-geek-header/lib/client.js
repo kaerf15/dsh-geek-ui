@@ -14,8 +14,11 @@
  * 会让“对话/轨迹”页签失能。故走 CSS + DOM 注入，官方 React 组件原样运行。
  *
  * ── 私有面脆弱点登记（平台升级先查这里，再查公共 API）──
- *  1. header 结构标记依赖官方 skeleton/ConversationSession.tsx 的 DOM 形状：
- *     nav(面包屑) 的父链 = titleCluster → titleRow → header；页签行 = [role="tablist"]。
+ *  1. header 结构标记依赖官方 skeleton 的 DOM 形状。0.2 起 <header> 在
+ *     conversation.session.header 槽之外（ConversationHeader），槽锚点是
+ *     display:contents，所以 titleRow 不再是 header 的直接子节点：
+ *     header → [data-slot=conversation.session.header] → titleRow → titleCluster → nav。
+ *     页签行仍是 [role="tablist"]，同样在槽内。
  *  2. 动作区/工具区定位依赖 [data-slot="conversation.session.header.actions" /
  *     "conversation.session.header.utilities"] 锚点——这是平台公开的稳定缝
  *    （scoped-slots.tsx 注释：“the addressable seam dynamic styles target”），非哈希类名。
@@ -65,7 +68,7 @@ header[data-dgu-root] {
 }
 
 /* 官方中间层透明化，titleCluster 提升为 header 的直接 flex 项 */
-header[data-dgu-root] > [data-dgu="titlerow"] { display: contents; }
+header[data-dgu-root] [data-dgu="titlerow"] { display: contents; }
 
 /* utilities 槽（Session log 等）整段隐藏，不进条带也不进 ⋯ 菜单（导出走 /export 命令）。
  * 两层都要杀：① 槽锚点带内联 display:contents（scoped-slots 锚点契约），选择器赢不了内联，
@@ -80,11 +83,9 @@ header[data-dgu-root] div:has(> [data-slot="conversation.session.header.utilitie
 header[data-dgu-root] [data-sidebar-right-expand] svg,
 [data-sidebar-right-toggle] svg { transform: scaleX(-1); }
 
-/* 官方预设选择器（agent-preset 座位：图标+预设名+下拉箭头）整颗隐藏。
- * 定位双条件：actions 槽领头位（order -10 最低者排最前）+ 自身或子级是
- * 带 aria-haspopup="menu" 的菜单钮——两个特征都中才杀，官方位次调整时宁漏勿误。
- * 位次契约：ui-agent-preset register order:-10（领头负序带，注释见官方 index.ts）。 */
-header[data-dgu-root] [data-slot="conversation.session.header.actions"] > :first-child:is(button[aria-haspopup="menu"], :has(button[aria-haspopup="menu"])) { display: none !important; }
+/* 官方预设名整颗隐藏。0.2 起它是只读 span（ui-agent-preset order:-10），
+ * 不再是菜单钮；更靠前的菜单（如智能体团队 order:-20）要留下，所以不按领头位杀。 */
+header[data-dgu-root] [data-slot="conversation.session.header.actions"] > span:not(:has(button)) { display: none !important; }
 
 /* 右栏展开钮（0.1.5 新增的 corner 槽，官方页头末项）：geek 布局下 titlerow
  * display:contents 把它提为 header 直接 flex 项，无 order 会按 0 沉到行首——
@@ -134,14 +135,14 @@ header[data-dgu-root] > .dgu-row1:not(:empty) {
   padding: 6px 0;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
-header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > [data-dgu="tabs"],
+header[data-dgu-root]:has(> .dgu-row1:not(:empty)) [data-dgu="tabs"],
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > .dgu-seg-anchor,
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) [data-dgu="cluster"],
 header[data-dgu-root]:has(> .dgu-row1:not(:empty)) > .dgu-toggle { margin-top: -1px; }
 
 /* 第二行：pi-web 式分段条——每段一个通高大按钮，段间 1px 竖线，统一 36px 行高；
  * 无胶囊无底，hover 整段浅灰底，选中段文字加深加粗。 */
-header[data-dgu-root] > [data-dgu="tabs"] {
+header[data-dgu-root] [data-dgu="tabs"] {
   order: 2;
   display: flex;
   align-items: stretch;
@@ -156,7 +157,7 @@ header[data-dgu-root] > [data-dgu="tabs"] {
  * 页签 / 生成标题 / 动作区与谱系槽的直接子元素 / ⋯ 开关共用：通高格子、hairline 边框
  *（底边让位给 header::after 通栏线）、直角、透明底。各类型只补化妆属性。
  * actions/lineage 用 > *：第三方注册进来的任何形状都自动套格子，不只认 span / div>button。 */
-header[data-dgu-root] > [data-dgu="tabs"] > button,
+header[data-dgu-root] [data-dgu="tabs"] > button,
 header[data-dgu-root] .dgu-seg-btn,
 header[data-dgu-root] [data-slot="conversation.session.header.actions"] > *,
 header[data-dgu-root] [data-slot="conversation.session.header.lineage"] > *,
@@ -175,13 +176,13 @@ header[data-dgu-root] > .dgu-toggle {
   min-height: 0;
 }
 /* 相邻段边线重叠：margin-left:-1px 让接缝仍是 1px（pi-web 的格子条观感） */
-header[data-dgu-root] > [data-dgu="tabs"] > button { font-weight: 400; line-height: 18px; }
-header[data-dgu-root] > [data-dgu="tabs"] > button + button { margin-left: -1px; }
-header[data-dgu-root] > [data-dgu="tabs"] > button::after { display: none; }
-header[data-dgu-root] > [data-dgu="tabs"] > button:hover {
+header[data-dgu-root] [data-dgu="tabs"] > button { font-weight: 400; line-height: 18px; }
+header[data-dgu-root] [data-dgu="tabs"] > button + button { margin-left: -1px; }
+header[data-dgu-root] [data-dgu="tabs"] > button::after { display: none; }
+header[data-dgu-root] [data-dgu="tabs"] > button:hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
-header[data-dgu-root] > [data-dgu="tabs"] > button[aria-selected="true"] {
+header[data-dgu-root] [data-dgu="tabs"] > button[aria-selected="true"] {
   background: var(--dsw-alias-interactive-bg-hover);
   box-shadow: none;
   color: var(--dsw-alias-label-primary);
@@ -189,14 +190,14 @@ header[data-dgu-root] > [data-dgu="tabs"] > button[aria-selected="true"] {
 }
 
 /* 分段条后段锚点：生成标题 / 系统提示词等，order 与页签相同、DOM 紧随 tabs */
-header[data-dgu-root] > .dgu-seg-anchor {
+header[data-dgu-root] .dgu-seg-anchor {
   order: 2;
   display: flex;
   align-items: stretch;
   height: 36px;
   margin-left: -1px;
 }
-header[data-dgu-root] > .dgu-seg-anchor.dgu-prompt-anchor { position: relative; }
+header[data-dgu-root] .dgu-seg-anchor.dgu-prompt-anchor { position: relative; }
 
 .dgu-seg-btn {
   color: var(--dsw-alias-label-tertiary);
@@ -394,7 +395,7 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       const items = useSyncExternalStore(props.registry.subscribe, props.registry.getSnapshot)
       const sessionId = useSyncExternalStore(
         (fn) => props.sessions.list.subscribe(fn),
-        () => props.sessions.list.getSnapshot().current,
+        () => currentSessionId(props.sessions.list.getSnapshot()),
       )
       if (items.length === 0) return null
       return items.map((entry) => h(entry.component, { key: entry.id, sessionId }))
@@ -427,11 +428,22 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       return typeof data.system === 'string' ? data.system : ''
     }
 
+    /* 0.2.0 起当前会话不在 list.current，而在被主视图 retain 的那一行 */
+    function currentSessionId(state) {
+      const byId = state && state.byId
+      if (!byId) return undefined
+      for (const id in byId) {
+        const held = byId[id] && byId[id].retainedBy && byId[id].retainedBy.mainView
+        if (held > 0) return id
+      }
+      return undefined
+    }
+
     /* 会话列表快照 → { id, blank }，memo 化引用（多实例共享同一 memo 无碍：值由同一 store 决定） */
     let lastSessionView = { id: undefined, blank: true }
     function readSessionView(sessions) {
       const state = sessions.list.getSnapshot()
-      const id = state.current
+      const id = currentSessionId(state)
       const blank = id === undefined || !!(state.byId[id] && state.byId[id].blank)
       if (lastSessionView.id !== id || lastSessionView.blank !== blank) lastSessionView = { id, blank }
       return lastSessionView
@@ -608,39 +620,50 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
     /* 拥挤测量：动作区被挤到页签下一行（或无页签时横向溢出）即折叠。
      * 测量前先摘掉 crowded/open 标记还原布局；测量完若仍拥挤则恢复 open——
      * 否则菜单展开期间动作区任何 DOM 变动（后台任务计数跳动等）都会把菜单强制收起。 */
+    /* 0.2 的 tablist 不是 header 的直接子节点。对着 header.insertBefore(node, tabs.nextSibling)
+     * 时 nextSibling 常为 null，等于每次都 append 一遍；previousElementSibling 永远不等于
+     * 嵌套的 tabs，条件恒真，MutationObserver 被自己的搬动重新触发，打开会话后打转。
+     * 锚点应成为 tablist 的兄弟，且已经在位就不动。 */
+    function placeAfter(node, after) {
+      if (!node || !after || !after.parentNode) return
+      if (node.parentNode === after.parentNode && node.previousElementSibling === after) return
+      after.parentNode.insertBefore(node, after.nextSibling)
+    }
+
     function measure(header) {
       const rec = records.get(header)
-      const tabs = markTabs(header)
-      /* 「生成标题」锚点：初始挂在 header 末尾，measure() 负责钉到 tabs 后面 */
-      if (rec && tabs && rec.titleAnchor.previousElementSibling !== tabs) {
-        header.insertBefore(rec.titleAnchor, tabs.nextSibling)
-      }
-      /* 「系统提示词」锚点：紧随「生成标题」 */
-      if (rec && rec.titleAnchor && rec.promptAnchor.previousElementSibling !== rec.titleAnchor) {
-        header.insertBefore(rec.promptAnchor, rec.titleAnchor.nextSibling)
-      }
-      const wasOpen = header.hasAttribute('data-dgu-actions-open')
-      header.removeAttribute('data-dgu-actions-open')
-      header.removeAttribute('data-dgu-crowded')
-      const cluster = header.querySelector('[data-dgu="cluster"]')
-      if (!cluster) return
-      const actionsAnchor = cluster.querySelector('[data-slot="' + SLOT_ACTIONS + '"]')
-      const hasContent = (actionsAnchor && actionsAnchor.childElementCount > 0)
-        || !!navLineageContent(cluster)
-      let crowded = false
-      if (hasContent) {
-        if (tabs) {
-          /* 换行判定：header 是 align-items:center，同排但高度不同的两项 offsetTop 本就
-           * 不同（垂直居中），不能用不等比较——cluster 顶边越过 tabs 底边才是真的
-           * 被挤到了下一行。1px 容差吸收亚像素取整。 */
-          crowded = cluster.offsetTop >= tabs.offsetTop + tabs.offsetHeight - 1
-        } else {
-          crowded = header.scrollWidth > header.clientWidth + 1
+      if (rec) rec.echo = true
+      try {
+        const tabs = markTabs(header)
+        /* 「生成标题」锚点钉在 tablist 后面，「系统提示词」紧随其后 */
+        if (rec && tabs) placeAfter(rec.titleAnchor, tabs)
+        if (rec && rec.titleAnchor) placeAfter(rec.promptAnchor, rec.titleAnchor)
+        const wasOpen = header.hasAttribute('data-dgu-actions-open')
+        header.removeAttribute('data-dgu-actions-open')
+        header.removeAttribute('data-dgu-crowded')
+        const cluster = header.querySelector('[data-dgu="cluster"]')
+        if (!cluster) return
+        const actionsAnchor = cluster.querySelector('[data-slot="' + SLOT_ACTIONS + '"]')
+        const hasContent = (actionsAnchor && actionsAnchor.childElementCount > 0)
+          || !!navLineageContent(cluster)
+        let crowded = false
+        if (hasContent) {
+          if (tabs) {
+            /* 换行判定：header 是 align-items:center，同排但高度不同的两项 offsetTop 本就
+             * 不同（垂直居中），不能用不等比较——cluster 顶边越过 tabs 底边才是真的
+             * 被挤到了下一行。1px 容差吸收亚像素取整。 */
+            crowded = cluster.offsetTop >= tabs.offsetTop + tabs.offsetHeight - 1
+          } else {
+            crowded = header.scrollWidth > header.clientWidth + 1
+          }
         }
-      }
-      if (crowded) {
-        header.setAttribute('data-dgu-crowded', '')
-        if (wasOpen) header.setAttribute('data-dgu-actions-open', '')
+        if (crowded) {
+          header.setAttribute('data-dgu-crowded', '')
+          if (wasOpen) header.setAttribute('data-dgu-actions-open', '')
+        }
+      } finally {
+        /* 测量会改属性/布局，ResizeObserver 的回声在下一帧之前丢掉，避免拥挤标记一摘一戴打转 */
+        if (rec) requestAnimationFrame(() => { if (records.get(header) === rec) rec.echo = false })
       }
     }
 
@@ -657,7 +680,8 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
       const cluster = nav.parentElement
       if (!cluster) return
       const titleRow = cluster.parentElement
-      if (!titleRow || titleRow.parentElement !== header) return
+      /* 0.2：titleRow 与 header 之间隔着 display:contents 的槽锚点 */
+      if (!titleRow || titleRow.closest('header') !== header) return
 
       header.setAttribute('data-dgu-root', '')
       cluster.setAttribute('data-dgu', 'cluster')
@@ -715,7 +739,11 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
         promptAnchor,
       }))
 
-      const ro = new ResizeObserver(() => measure(header))
+      const ro = new ResizeObserver(() => {
+        const rec = records.get(header)
+        if (rec && rec.echo) return
+        measure(header)
+      })
       ro.observe(header)
 
       records.set(header, { root, row1, titleAnchor, promptAnchor, toggle, ro, onDocDown, onToggle })
@@ -737,7 +765,7 @@ header[data-dgu-root][data-dgu-actions-open] [data-slot="conversation.session.he
     }
 
     function syncAll(services) {
-      const found = document.querySelectorAll('[data-slot="' + SLOT_HEADER + '"] > header')
+      const found = document.querySelectorAll('header:has([data-slot="' + SLOT_HEADER + '"])')
       found.forEach((header) => decorate(header, services))
       /* header 整体被 React 重挂载/移除时回收旧记录 */
       records.forEach((_, header) => { if (!header.isConnected) undecorate(header) })

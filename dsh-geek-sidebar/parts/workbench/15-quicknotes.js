@@ -4,6 +4,17 @@
  * 整体配色与 dsh-geek-sidebar 100% 统一（基于 --dsw-alias-bg-base 与标准 1px 分割线，无杂乱色块）；
  * 便签项悬停展现与侧栏统一尺寸位置的标准按钮（@、改名、删除）；纵向分割线与顶边拖拽线采用标准 1px 细线风格。 */
 
+/* 0.2.0：当前主视图会话是 retainedBy.mainView > 0 的那一行，不再有 list.current */
+function mainViewSessionId(snap) {
+  const byId = snap && snap.byId;
+  if (!byId) return undefined;
+  for (const id in byId) {
+    const held = byId[id] && byId[id].retainedBy && byId[id].retainedBy.mainView;
+    if (held > 0) return id;
+  }
+  return undefined;
+}
+
 function NotebookIcon(t) {
   return ic(
     [
@@ -1174,7 +1185,7 @@ function QuickNotesPanel() {
           const sessions = qnAppCtx ? qnAppCtx.get("sessions") : null;
           if (sessions && sessions.list) {
             const snap = sessions.list.getSnapshot();
-            const curId = sid || snap.current;
+            const curId = sid || mainViewSessionId(snap);
             const curSess = curId && snap.byId ? snap.byId[curId] : null;
             if (curSess && curSess.projectionValues && curSess.projectionValues.modelSelection) {
               const ms = curSess.projectionValues.modelSelection;

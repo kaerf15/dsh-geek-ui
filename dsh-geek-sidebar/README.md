@@ -19,9 +19,9 @@ dsh plugin --profile web add dsh-geek-sidebar
 
 ## 兼容
 
-`dsh.verifiedWith: 0.1.5-rc.1`
+`dsh.verifiedWith: 0.2.0-rc.2`
 
-> **⚠ 本版（v2.1.0+）仅适配 dsh ≥ 0.1.5-rc.1，与 0.1.2 及更早版本不兼容**：预览从旧版依赖的 details 栏（平台已在 0.1.5 移除）迁入官方右侧栏 tab 体系，同时禁用了官方 `ui-sidebar-files` 页（写入 bundle 自带补丁，卸载本插件即自动恢复）。仍在 0.1.2 的用户请装 v2.0.5。
+> **⚠ 本版（v2.1.2+）适配 dsh 0.2.0-rc.2**：预览在官方右侧栏 tab 体系里，同时禁用了官方 `ui-sidebar-files` 页（写入 bundle 自带补丁，卸载本插件即自动恢复）。交付文件行的 DOM 标记是 `data-presented-files-row`。
 
 ## License
 

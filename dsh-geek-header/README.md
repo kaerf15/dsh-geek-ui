@@ -50,7 +50,7 @@ export function apply(ctx) {
 
 ## 兼容
 
-`dsh.verifiedWith: 0.1.2-rc.1`
+`dsh.verifiedWith: 0.2.0-rc.2`
 
 ## License
 

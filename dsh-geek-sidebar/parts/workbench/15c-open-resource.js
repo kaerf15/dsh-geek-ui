@@ -6,7 +6,7 @@
  * openResource 包一层：dsh-resource://file/ 地址改道自家预览（与 12-mdpath
  * openLocalPath 同语义：当前会话 + store.open），其余地址原样放行。
  *
- * 钉住的平台私有面（0.1.5-rc.1，平台升级先核对）：
+ * 钉住的平台私有面（0.2.0-rc.2 仍在，平台升级先核对）：
  *   - sidebarRight 服务存在（ui-sidebar-right 提供），openResource 可被实例属性覆写
  *     （服务是 SidebarRightController 实例，cordis 不冻结服务面对象）
  *   - dsh-resource://file/ 地址文法（util/workspace-path file-address.ts）：

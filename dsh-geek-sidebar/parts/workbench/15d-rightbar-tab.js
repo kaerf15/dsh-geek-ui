@@ -6,7 +6,7 @@
  *   - body 复用现有 PanelHost（读自家 preview store，dshDetailsPanels 三方驱动面不变）；
  *   - openLocalPath（12-mdpath）打开文件后调 revealPreviewTab() 揭示右栏；
  *   - 官方右栏展开钮 ③ 天然成为预览的入口/出口。
- * 钉住的平台私有面（0.1.5-rc.1，升级先核对）：
+ * 钉住的平台私有面（0.2.0-rc.2 仍在，升级先核对）：
  *   - ctx.sidebarRightTabs.register(definition)：{id, kind, title, 无 patterns 即页面型}
  *   - ctx.sidebarRight.openTab(kind)：揭示栏并把该页 tab 置前（页面型 pane 内去重）
  *   - body 注册槽 sidebar.right.pane.tab，key = 定义的 id

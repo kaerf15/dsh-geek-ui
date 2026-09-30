@@ -29,7 +29,7 @@ export const name = 'dsh-geek-header'
 /* webServer 挂载点；sessions 取活会话；llm 辅助调用；sessionTitle 落标题。缺一不启动。 */
 export const inject = ['webServer', 'sessions', 'llm', 'sessionTitle']
 
-/** pi-web auto-name 的原版指令（app/api/sessions/[id]/auto-name/route.ts），逐字保留。 */
+/** pi-web auto-name 的原版指令（上游 app/api/sessions/[id]/auto-name/route.ts，仓库内副本已删），逐字保留。 */
 const TITLE_INSTRUCTION = `Create a concise title for this session based on the conversation above.
 
 Requirements:

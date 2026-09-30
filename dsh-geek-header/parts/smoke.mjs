@@ -27,7 +27,7 @@ check('client.js ModuleLoader 包装', client.startsWith('window.__ModuleLoader_
 check('client.js id 一致', client.includes("id: 'dsh-geek-header'"))
 check('client.js exports.inject 声明 sessions', client.includes("exports.inject = ['sessions']"))
 check('client.js 提供 geekUiHeader 服务', client.includes("ctx.provide('geekUiHeader')"))
-check('client.js 生成标题锚点（钉在页签后）', client.includes("className = 'dgu-seg-anchor dgu-title-anchor'") && client.includes('previousElementSibling !== tabs'))
+check('client.js 生成标题锚点（钉在页签后）', client.includes("className = 'dgu-seg-anchor dgu-title-anchor'") && client.includes('placeAfter(rec.titleAnchor, tabs)'))
 check('client.js 系统提示词锚点（紧随生成标题）', client.includes("className = 'dgu-seg-anchor dgu-prompt-anchor'") && client.includes('rec.promptAnchor'))
 check('client.js 分段条按钮共享样式', client.includes('.dgu-seg-btn') && client.includes('fetchGeekHeader'))
 check('client.js 系统提示词 host 拉取', client.includes('/system-prompt?sessionId='))
@@ -55,6 +55,7 @@ check('index.js pi-web 原版指令', host.includes('Create a concise title for 
 check('index.js 整段对话采集', host.includes("ev.type === 'assistant/message'"))
 check('v0.4.5：事件读取走 snapshotEvents（alpha.4 移除 Session.events getter）', host.includes('session.snapshotEvents()') && !host.includes('session.events'))
 check('v0.5.0：system 改读 system/message 事件（0.1.5 EpochHeader 无 system 字段）', host.includes("system/message"))
+check('v0.5.2：0.2 页头在槽外，按 header:has(slot) 装饰', client.includes('header:has([data-slot="' + '")') || client.includes("header:has([data-slot=\""))
 
 /* 行为级：readSystemPrompt 对假会话的读取语义（0.1.5 存储模型） */
 const rspSrc = host.match(/function readSystemPrompt\(session\) \{[\s\S]*?\n\}/)

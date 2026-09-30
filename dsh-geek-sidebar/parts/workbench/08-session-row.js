@@ -45,7 +45,8 @@ function SessionRow(t) {
       (w.stopPropagation(), l && l.archiveSession(o).catch(() => {}));
     },
     D = () => {
-      u || y || (a && a.open(o));
+      if (u || y) return;
+      if (typeof t.openSession === "function") t.openSession(o);
     },
     /* 复制会话所在文件夹的绝对路径（host 按 dsh 会话持久化布局计算
      * <DSH_HOME>/sessions/<projectKey>/<session-id>/）；升 transient “已复制”态。 */

@@ -465,7 +465,7 @@ try {
     HK.sessionProbe.set('ck1')
     HK.sessionCwd.sid = 'ck1'
     HK.sessionCwd.cwd = '/ws'
-    const CHIP_SEL = 'div[data-produced-files-row] button[title]'
+    const CHIP_SEL = 'div[data-presented-files-row] button[title]'
     const LINK_SEL = 'div[data-variant] [class*="fileLink"]'
     /* hit: {chip: title路径} 或 {link: 摘要文本} 或 {}（不命中任何选择器） */
     const mkEv = (hit, mods) => ({

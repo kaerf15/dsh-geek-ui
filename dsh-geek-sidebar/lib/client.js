@@ -2436,7 +2436,8 @@ function SessionRow(t) {
       (w.stopPropagation(), l && l.archiveSession(o).catch(() => {}));
     },
     D = () => {
-      u || y || (a && a.open(o));
+      if (u || y) return;
+      if (typeof t.openSession === "function") t.openSession(o);
     },
     /* 复制会话所在文件夹的绝对路径（host 按 dsh 会话持久化布局计算
      * <DSH_HOME>/sessions/<projectKey>/<session-id>/）；升 transient “已复制”态。 */
@@ -2571,6 +2572,19 @@ function SessionRow(t) {
           ),
         );
 }
+/* 同一次点击里 openSession 会同步触发列表刷新，刷新若再进来就会打转。闸住重入。 */
+let sessionOpenGate = false;
+function openMainSession(nav, id) {
+  if (sessionOpenGate || !nav || typeof nav.openSession !== "function" || !id) return;
+  sessionOpenGate = true;
+  try {
+    nav.openSession(id);
+  } finally {
+    setTimeout(() => {
+      sessionOpenGate = false;
+    }, 0);
+  }
+}
 function Sidebar(t) {
   const e = React.createElement,
     s = t.layout,
@@ -2582,6 +2596,8 @@ function Sidebar(t) {
     u = useFilesTab(),
     r = t.useSessions((n) => n.ids),
     m = t.useSessions((n) => n.byId),
+    /* 0.2.0：list.current 恒为 undefined。不要改从 retainedBy 派生——
+     * 打开会话后那次派生会和目录同步搅在一起把页面打转。选中只走 openSession。 */
     k = t.useSessions((n) => n.current),
     h = t.useWorkspaces((n) => n.items),
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
@@ -2647,13 +2663,11 @@ function Sidebar(t) {
       return f && !ye[n] && f.origin !== "subagent";
     }),
     Z = k ? m[k] : void 0,
-    Se = React.useRef(null),
     lastSynced = React.useRef({ sid: null, cwd: null });
   React.useEffect(() => {
-    /* 会话工作目录同步保护：
-     * 1. 当处于有效会话且该会话有 cwd 时：若会话变更 (k 变化) 或该会话 cwd 异步到齐，严格同步为当前会话所在目录；
-     *    利用 lastSynced 记录已同步状态，避免用户手动在下拉菜单切目录时被微任务中的旧 cwd 抢占回弹；
-     * 2. 只有在平台确实没有任何活跃会话且 p 尚未初始化时，才安全回退到最近或首个工作区，绝不产生竞态覆盖。 */
+    /* 会话工作目录同步：主视图会话有 cwd 时跟上它。
+     * 0.2 不再在切走时 archive 空白会话——平台自己回收 blank，客户端再 archive
+     * 会和 mainView 引用对打，打开会话后渲染死循环。 */
     const curCwd = Z && Z.cwd;
     if (curCwd) {
       if (lastSynced.current.sid !== k || lastSynced.current.cwd !== curCwd) {
@@ -2663,11 +2677,6 @@ function Sidebar(t) {
     } else if (!p) {
       const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
       if (n && n.path) C(n.path);
-    }
-    const n = Se.current;
-    if (((Se.current = k || null), n && n !== k && a)) {
-      const f = m[n];
-      f && f.blank === !0 && a.archiveSession(n).catch(() => {});
     }
   }, [k, Z && Z.cwd, h, g]);
   const oe = (n) => {
@@ -2840,8 +2849,9 @@ function Sidebar(t) {
         (d, W) => (m[W].updatedAt || 0) - (m[d].updatedAt || 0),
       )[0];
       /* 评审修复：返回是否命中，无匹配会话时调用方落到 _e 连接目标工作区 */
-      if (!f || !o) return false;
-      o.open(f);
+      /* 0.2.0：sessions.open 已移除，打开主视图走 uiWorkspace.openSession */
+      if (!f) return false;
+      openMainSession(nav, f);
       return true;
     },
     $e = (n) => {
@@ -3121,6 +3131,7 @@ function Sidebar(t) {
                 sm: f,
                 active: n === k,
                 sessionsSvc: o,
+                openSession: (id) => openMainSession(nav, id),
                 workspacesSvc: a,
                 branch:
                   (ee(f.cwd) !== f.cwd && R[f.cwd] && R[f.cwd].branch) || null,
@@ -4177,8 +4188,8 @@ function LayersIcon(t) {
  * 宿主原生 open（系统默认应用，即"外部打开"）。这里在 document capture 阶段拦
  * 普通左键改道应用内预览（delivOpenFile → openLocalPath）；修饰键点击保留系统
  * 打开。（v1.22.0 起：产物/链接弹出面板与事件窗口订阅整体移除，仅保留本接管。）
- *   ① 产出文件 chip（ui-deliverables ProducedFiles.tsx）：行容器自带
- *      data-produced-files-row，chip 为 button[title=完整路径]；
+ *   ① 产出文件 chip（ui-deliverables）：行容器自带
+ *      data-presented-files-row，chip 为 button[title=完整路径]；
  *      「在文件夹中显示」钮 openFile('.') 无 title 属性，自然放行。
  *   ② 工具卡文件链接（ui-tool ToolRow.tsx，read/write/edit 行）：摘要按钮产物类名
  *      形如 "o3BgMG_fileLink"（vite CSS Modules <hash>_<local>，fileLink 子段健在），
@@ -4190,7 +4201,8 @@ function LayersIcon(t) {
  *
  * 钉住的平台私有面（0.1.2-alpha.4，平台升级先核对）：
  *   - chat openFile→openWorkspacePath 外部打开语义（ui-chat apply.ts）
- *   - ProducedFiles 行容器属性 data-produced-files-row + chip button[title=完整路径]
+ *   - 交付行容器属性 data-presented-files-row + chip button[title=完整路径]
+ *     （0.2.0 起由 data-produced-files-row 改名；按钮 title 仍是解析后的完整路径）
  *   - ToolRow 行根 data-variant + 摘要按钮产物类名含 fileLink 子段 + 摘要文本 =
  *     relativizeToCwd + abbreviateHomePath 语义
  *   - React 17+ 根容器事件委托（document capture 先于根委托）
@@ -4211,7 +4223,7 @@ function delivOpenFile(cwd, p) {
   openLocalPath(delivAbsPath(cwd, p));
 }
 
-const DELIV_CHIP_SEL = "div[data-produced-files-row] button[title]";
+const DELIV_CHIP_SEL = "div[data-presented-files-row] button[title]";
 const DELIV_TOOL_LINK_SEL = 'div[data-variant] [class*="fileLink"]';
 function delivChipHook(ev) {
   if (ev.defaultPrevented || ev.button !== 0) return;
@@ -4530,6 +4542,17 @@ function DirPickerHost() {
  * 顶栏极简（左侧 + 图标、紧凑搜索框、AI 生成标题；右侧与侧边栏同款 ChevronDown SVG 图标）；
  * 整体配色与 dsh-geek-sidebar 100% 统一（基于 --dsw-alias-bg-base 与标准 1px 分割线，无杂乱色块）；
  * 便签项悬停展现与侧栏统一尺寸位置的标准按钮（@、改名、删除）；纵向分割线与顶边拖拽线采用标准 1px 细线风格。 */
+
+/* 0.2.0：当前主视图会话是 retainedBy.mainView > 0 的那一行，不再有 list.current */
+function mainViewSessionId(snap) {
+  const byId = snap && snap.byId;
+  if (!byId) return undefined;
+  for (const id in byId) {
+    const held = byId[id] && byId[id].retainedBy && byId[id].retainedBy.mainView;
+    if (held > 0) return id;
+  }
+  return undefined;
+}
 
 function NotebookIcon(t) {
   return ic(
@@ -5701,7 +5724,7 @@ function QuickNotesPanel() {
           const sessions = qnAppCtx ? qnAppCtx.get("sessions") : null;
           if (sessions && sessions.list) {
             const snap = sessions.list.getSnapshot();
-            const curId = sid || snap.current;
+            const curId = sid || mainViewSessionId(snap);
             const curSess = curId && snap.byId ? snap.byId[curId] : null;
             if (curSess && curSess.projectionValues && curSess.projectionValues.modelSelection) {
               const ms = curSess.projectionValues.modelSelection;
@@ -6540,7 +6563,7 @@ function QuickNotesHost() {
  * openResource 包一层：dsh-resource://file/ 地址改道自家预览（与 12-mdpath
  * openLocalPath 同语义：当前会话 + store.open），其余地址原样放行。
  *
- * 钉住的平台私有面（0.1.5-rc.1，平台升级先核对）：
+ * 钉住的平台私有面（0.2.0-rc.2 仍在，平台升级先核对）：
  *   - sidebarRight 服务存在（ui-sidebar-right 提供），openResource 可被实例属性覆写
  *     （服务是 SidebarRightController 实例，cordis 不冻结服务面对象）
  *   - dsh-resource://file/ 地址文法（util/workspace-path file-address.ts）：
@@ -6625,7 +6648,7 @@ function installOpenResourceHook(t) {
  *   - body 复用现有 PanelHost（读自家 preview store，dshDetailsPanels 三方驱动面不变）；
  *   - openLocalPath（12-mdpath）打开文件后调 revealPreviewTab() 揭示右栏；
  *   - 官方右栏展开钮 ③ 天然成为预览的入口/出口。
- * 钉住的平台私有面（0.1.5-rc.1，升级先核对）：
+ * 钉住的平台私有面（0.2.0-rc.2 仍在，升级先核对）：
  *   - ctx.sidebarRightTabs.register(definition)：{id, kind, title, 无 patterns 即页面型}
  *   - ctx.sidebarRight.openTab(kind)：揭示栏并把该页 tab 置前（页面型 pane 内去重）
  *   - body 注册槽 sidebar.right.pane.tab，key = 定义的 id
