@@ -207,7 +207,12 @@ export function workbenchApi(ctx, cfg) {
 
   async function run(command, timeoutMs) {
     if (!shell) throw new Error('shell unavailable')
-    return shell.run(shell.resolve({ command, timeoutMs: timeoutMs || 1e4, env: { LC_ALL: 'C' } }))
+    /* shell 服务的 run() 早已移除（0.1.0-rc.8 时代遗物）：现行为
+     * execute(resolve(req)) → handle.result()。返回 ShellRunResult，
+     * stdout/stderr 为 CollectedOutput（.text 兼容下方 stdoutOf/errOf），
+     * exitCode 为 null 表信号死亡/准备超时——下游 `exitCode !== 0` 判断兼容。 */
+    const handle = await shell.execute(shell.resolve({ command, timeoutMs: timeoutMs || 1e4, env: { LC_ALL: 'C' } }))
+    return handle.result()
   }
   async function git(cwd, args) {
     const r = await run('git -C ' + q(cwd) + ' ' + args.map(q).join(' '), 1e4)
@@ -616,7 +621,7 @@ export function workbenchApi(ctx, cfg) {
       const r = await run(pickFilesCmd('选择要上传的文件'), 12e4)
       if (r.exitCode !== 0) {
         const o = errOf(r)
-        return /canceled/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
+        return /canceled|已取消|user canceled|\(-128\)/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
       }
       const picked = stdoutOf(r).split('\n').map((x) => x.trim()).filter(Boolean)
       const done = []
@@ -884,7 +889,7 @@ export function workbenchApi(ctx, cfg) {
       const r = await run(pickFolderCmd('选择笔记目录'), 12e4)
       if (r.exitCode !== 0) {
         const o = errOf(r)
-        return /canceled/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
+        return /canceled|已取消|user canceled|\(-128\)/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
       }
       const dir = stdoutOf(r).trim().replace(/[\\/]+$/, '')
       if (!dir) return { ok: false, error: 'empty selection' }
