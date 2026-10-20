@@ -351,9 +351,21 @@ function occurTarget(sid) {
     if (o.sid === sid && (!best || o.touch >= best.touch)) best = o;
   return best ? best.key : null;
 }
-/* 预览桶键解析：有存活实例 → 最近交互实例；无 → 会话裸桶（兼容无实例期的写入） */
+/* 0.2.1：右栏 pane tab body 现在拿到真实 sessionId（会话作用域 props 下发），
+ * 实例键 = 真 sid::tabId；而写入侧（树/聊天打开）按 0.2 设计拿不到会话 id
+ *（list.current 恒 undefined，sessionProbe.sid 恒 null），previewKeyFor 原样
+ * 会落匿名桶 "_"，与实例键错开——表现为「点击文件预览无反应」。
+ * sid 缺席时改为路由到全局最近交互的存活实例（同刻取后挂载者），与
+ * occurTouch 的「栏内按下即写入目标」纪律一致；多会话分栏时以触摸为准。 */
+function occurTargetAny() {
+  let best = null;
+  for (const o of occurList) if (!best || o.touch >= best.touch) best = o;
+  return best ? best.key : null;
+}
+/* 预览桶键解析：有同会话存活实例 → 最近交互实例；sid 缺席 → 全局最近实例；
+ * 都无 → 会话裸桶（兼容无实例期的写入） */
 function previewKeyFor(sid) {
-  return (sid && occurTarget(sid)) || sid;
+  return (sid && occurTarget(sid)) || occurTargetAny() || sid;
 }
 /* 实例挂载：登记 + 收养会话裸桶。合并语义而非「空才收」——body 卸载期
  *（同栏切走再切回）写入会落裸桶，重挂载时自身桶可能非空，一律把裸桶里
@@ -361,12 +373,15 @@ function previewKeyFor(sid) {
 function occurAdopt(key, sid) {
   occurAdd(key, sid);
   const mine = store.bucket(key),
-    legacy = sid && store.buckets[sid];
-  if (legacy && legacy.files.length > 0) {
-    for (const f of legacy.files)
+    legacy = sid && store.buckets[sid],
+    /* 0.2.1：sid 缺席的写入落匿名桶 "_"（previewKeyFor 兜底），挂载时一并收养 */
+    anon = store.buckets._;
+  for (const legacyOf of [anon, legacy]) {
+    if (!legacyOf || legacyOf.files.length === 0) continue;
+    for (const f of legacyOf.files)
       mine.files.some((x) => x.path === f.path) || mine.files.push(f);
-    legacy.active && (mine.active = legacy.active);
-    ((legacy.files = []), (legacy.active = null));
+    legacyOf.active && (mine.active = legacyOf.active);
+    ((legacyOf.files = []), (legacyOf.active = null));
     bus.fire();
   }
 }
