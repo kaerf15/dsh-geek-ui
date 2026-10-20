@@ -352,20 +352,20 @@ function occurTarget(sid) {
   return best ? best.key : null;
 }
 /* 0.2.1：右栏 pane tab body 现在拿到真实 sessionId（会话作用域 props 下发），
- * 实例键 = 真 sid::tabId；而写入侧（树/聊天打开）按 0.2 设计拿不到会话 id
- *（list.current 恒 undefined，sessionProbe.sid 恒 null），previewKeyFor 原样
- * 会落匿名桶 "_"，与实例键错开——表现为「点击文件预览无反应」。
- * sid 缺席时改为路由到全局最近交互的存活实例（同刻取后挂载者），与
- * occurTouch 的「栏内按下即写入目标」纪律一致；多会话分栏时以触摸为准。 */
+ * 实例键 = 真 sid::tabId；写入侧自 2.1.4 起也带真 sid（09-sidebar 的 mainSid），
+ * 同会话路由命中实例键；同会话无实例时必须落自家裸桶等收养——若回落到
+ * 别会话的隐藏实例（平台保留非活跃会话的右栏 surface），写入不可见，
+ * 又是「点击没反应」。occurTargetAny 只在 sid 缺席时兜底（如无会话期点击）。 */
 function occurTargetAny() {
   let best = null;
   for (const o of occurList) if (!best || o.touch >= best.touch) best = o;
   return best ? best.key : null;
 }
-/* 预览桶键解析：有同会话存活实例 → 最近交互实例；sid 缺席 → 全局最近实例；
- * 都无 → 会话裸桶（兼容无实例期的写入） */
+/* 预览桶键解析：同会话有存活实例 → 最近交互实例；同会话无实例 → 会话裸桶
+ *（该会话预览 tab 挂载时收养）；sid 缺席 → 全局最近实例，再退匿名桶。 */
 function previewKeyFor(sid) {
-  return (sid && occurTarget(sid)) || occurTargetAny() || sid;
+  if (sid) return occurTarget(sid) || sid;
+  return occurTargetAny() || sid;
 }
 /* 实例挂载：登记 + 收养会话裸桶。合并语义而非「空才收」——body 卸载期
  *（同栏切走再切回）写入会落裸桶，重挂载时自身桶可能非空，一律把裸桶里
@@ -374,16 +374,18 @@ function occurAdopt(key, sid) {
   occurAdd(key, sid);
   const mine = store.bucket(key),
     legacy = sid && store.buckets[sid],
-    /* 0.2.1：sid 缺席的写入落匿名桶 "_"（previewKeyFor 兜底），挂载时一并收养 */
+    /* sid 缺席的写入落匿名桶 "_"（previewKeyFor 兜底），挂载时一并收养 */
     anon = store.buckets._;
+  let dirty = false;
   for (const legacyOf of [anon, legacy]) {
     if (!legacyOf || legacyOf.files.length === 0) continue;
     for (const f of legacyOf.files)
       mine.files.some((x) => x.path === f.path) || mine.files.push(f);
     legacyOf.active && (mine.active = legacyOf.active);
     ((legacyOf.files = []), (legacyOf.active = null));
-    bus.fire();
+    dirty = true;
   }
+  dirty && bus.fire();
 }
 function usePreviewState(t) {
   const s = React.useState(0)[1];
@@ -2611,15 +2613,12 @@ function Sidebar(t) {
     u = useFilesTab(),
     r = t.useSessions((n) => n.ids),
     m = t.useSessions((n) => n.byId),
-    /* 0.2.0：list.current 恒为 undefined。不要改从 retainedBy 派生——
-     * 打开会话后那次派生会和目录同步搅在一起把页面打转。选中只走 openSession。 */
-    k = t.useSessions((n) => n.current),
-    /* 提及/探测专用当前会话（不进目录同步）：list.current 恒空，改从 byId 行
-     * retainedBy.mainView 派生主视图会话。0.2.x 里 k 恒 undefined 曾让
-     * onMention 恒 void 0（树悬停 @ 消失）、sessionProbe.sid 恒 null（预览
-     * 面板 @ 点了空转、openLocalPath 预览键落匿名桶）——km 只喂这三处与
-     * sessionCwd（被动读取的可变对象，无打转风险），目录跟随仍走 k。 */
-    km = t.useSessions((n) => {
+    /* 主视图会话：0.2 起 list.current 恒 undefined，改从 byId 行 retainedBy.mainView
+     * 派生。喂提及/探测/预览路由/会话行高亮（0.2.x 曾因此恒空：树悬停 @ 消失、
+     * 预览面板 @ 空转、sessionCwd 不跟踪、会话行不高亮）。
+     * 不复活「目录跟随会话」：该派生与目录 cwd 同步互搅会打转（0.2.0 实踩），
+     * 目录只走 openSession/手选。 */
+    mainSid = t.useSessions((n) => {
       const b = n.byId;
       for (const id of n.ids || []) {
         const row = b[id];
@@ -2631,8 +2630,6 @@ function Sidebar(t) {
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
     y = t.useWorkspaces((n) => n.archivedSessionIds),
     x = React.useState(() => {
-      const cur = k && m && m[k] && m[k].cwd;
-      if (cur) return cur;
       const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
       return (n && n.path) || null;
     }),
@@ -2689,24 +2686,14 @@ function Sidebar(t) {
   const Y = (r || []).filter((n) => {
       const f = m[n];
       return f && !ye[n] && f.origin !== "subagent";
-    }),
-    Z = k ? m[k] : void 0,
-    lastSynced = React.useRef({ sid: null, cwd: null });
+    });
   React.useEffect(() => {
-    /* 会话工作目录同步：主视图会话有 cwd 时跟上它。
-     * 0.2 不再在切走时 archive 空白会话——平台自己回收 blank，客户端再 archive
-     * 会和 mainView 引用对打，打开会话后渲染死循环。 */
-    const curCwd = Z && Z.cwd;
-    if (curCwd) {
-      if (lastSynced.current.sid !== k || lastSynced.current.cwd !== curCwd) {
-        lastSynced.current = { sid: k, cwd: curCwd };
-        C(curCwd);
-      }
-    } else if (!p) {
+    /* 无目录时回落最近工作区。「目录跟随会话 cwd」已随 0.2 退役（见 mainSid 注）。 */
+    if (!p) {
       const n = (h || []).find((f) => f.workspaceId === g) || (h || [])[0];
       if (n && n.path) C(n.path);
     }
-  }, [k, Z && Z.cwd, h, g]);
+  }, [h, g]);
   const oe = (n) => {
       const f = [],
         d = {},
@@ -2739,13 +2726,13 @@ function Sidebar(t) {
     setCurrentRootPath(p); /* 评审修复：原裸赋值 currentRootPath=p 无 bus 节拍，订阅方感知不到 */
   }, [p]),
     React.useEffect(() => {
-      sessionProbe.set(km || null);
+      sessionProbe.set(mainSid || null);
       /* chat 文件点击接管的 cwd 跟踪（15-deliv）：sid/cwd 同源同拍，消费方比对 sid；
        * m 入 deps——byId 行补齐（cwd 字段晚到）也重同步 */
-      const row = km ? m[km] : null;
-      sessionCwd.sid = km || null;
+      const row = mainSid ? m[mainSid] : null;
+      sessionCwd.sid = mainSid || null;
       sessionCwd.cwd = (row && row.cwd) || null;
-    }, [km, m]));
+    }, [mainSid, m]));
   const ce = (n, f) =>
     n
       ? host
@@ -3157,7 +3144,7 @@ function Sidebar(t) {
                 key: n,
                 id: n,
                 sm: f,
-                active: n === k,
+                active: n === mainSid,
                 sessionsSvc: o,
                 openSession: (id) => openMainSession(nav, id),
                 workspacesSvc: a,
@@ -3176,22 +3163,22 @@ function Sidebar(t) {
         layout: s,
         open: pe,
         onToggle: ke,
-        /* 预览桶路由键用 km（主视图会话）：t.sessionId 仅供 previewKeyFor 系列
-         * 读取（03-tree 全部用途），k 恒空会让树写入落匿名桶。 */
-        sessionId: km,
+        /* 预览桶路由键用 mainSid（主视图会话）：t.sessionId 仅供 previewKeyFor
+         * 系列读取（03-tree 全部用途）。 */
+        sessionId: mainSid,
         onMention:
-          t.mentionBridge && km
+          t.mentionBridge && mainSid
             ? (n) =>
                 t.mentionBridge.mention(
-                  km,
+                  mainSid,
                   mentionRef(n.path, n.type === "directory"),
                 )
             : void 0,
         onMentionAbs:
-          t.mentionBridge && km
+          t.mentionBridge && mainSid
             ? (n) =>
                 t.mentionBridge.mention(
-                  km,
+                  mainSid,
                   mentionRef(n.path, n.type === "directory", { abs: true }),
                 )
             : void 0,

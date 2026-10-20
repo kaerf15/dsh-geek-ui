@@ -231,20 +231,20 @@ function occurTarget(sid) {
   return best ? best.key : null;
 }
 /* 0.2.1：右栏 pane tab body 现在拿到真实 sessionId（会话作用域 props 下发），
- * 实例键 = 真 sid::tabId；而写入侧（树/聊天打开）按 0.2 设计拿不到会话 id
- *（list.current 恒 undefined，sessionProbe.sid 恒 null），previewKeyFor 原样
- * 会落匿名桶 "_"，与实例键错开——表现为「点击文件预览无反应」。
- * sid 缺席时改为路由到全局最近交互的存活实例（同刻取后挂载者），与
- * occurTouch 的「栏内按下即写入目标」纪律一致；多会话分栏时以触摸为准。 */
+ * 实例键 = 真 sid::tabId；写入侧自 2.1.4 起也带真 sid（09-sidebar 的 mainSid），
+ * 同会话路由命中实例键；同会话无实例时必须落自家裸桶等收养——若回落到
+ * 别会话的隐藏实例（平台保留非活跃会话的右栏 surface），写入不可见，
+ * 又是「点击没反应」。occurTargetAny 只在 sid 缺席时兜底（如无会话期点击）。 */
 function occurTargetAny() {
   let best = null;
   for (const o of occurList) if (!best || o.touch >= best.touch) best = o;
   return best ? best.key : null;
 }
-/* 预览桶键解析：有同会话存活实例 → 最近交互实例；sid 缺席 → 全局最近实例；
- * 都无 → 会话裸桶（兼容无实例期的写入） */
+/* 预览桶键解析：同会话有存活实例 → 最近交互实例；同会话无实例 → 会话裸桶
+ *（该会话预览 tab 挂载时收养）；sid 缺席 → 全局最近实例，再退匿名桶。 */
 function previewKeyFor(sid) {
-  return (sid && occurTarget(sid)) || occurTargetAny() || sid;
+  if (sid) return occurTarget(sid) || sid;
+  return occurTargetAny() || sid;
 }
 /* 实例挂载：登记 + 收养会话裸桶。合并语义而非「空才收」——body 卸载期
  *（同栏切走再切回）写入会落裸桶，重挂载时自身桶可能非空，一律把裸桶里
@@ -253,16 +253,18 @@ function occurAdopt(key, sid) {
   occurAdd(key, sid);
   const mine = store.bucket(key),
     legacy = sid && store.buckets[sid],
-    /* 0.2.1：sid 缺席的写入落匿名桶 "_"（previewKeyFor 兜底），挂载时一并收养 */
+    /* sid 缺席的写入落匿名桶 "_"（previewKeyFor 兜底），挂载时一并收养 */
     anon = store.buckets._;
+  let dirty = false;
   for (const legacyOf of [anon, legacy]) {
     if (!legacyOf || legacyOf.files.length === 0) continue;
     for (const f of legacyOf.files)
       mine.files.some((x) => x.path === f.path) || mine.files.push(f);
     legacyOf.active && (mine.active = legacyOf.active);
     ((legacyOf.files = []), (legacyOf.active = null));
-    bus.fire();
+    dirty = true;
   }
+  dirty && bus.fire();
 }
 function usePreviewState(t) {
   const s = React.useState(0)[1];
