@@ -2614,6 +2614,19 @@ function Sidebar(t) {
     /* 0.2.0：list.current 恒为 undefined。不要改从 retainedBy 派生——
      * 打开会话后那次派生会和目录同步搅在一起把页面打转。选中只走 openSession。 */
     k = t.useSessions((n) => n.current),
+    /* 提及/探测专用当前会话（不进目录同步）：list.current 恒空，改从 byId 行
+     * retainedBy.mainView 派生主视图会话。0.2.x 里 k 恒 undefined 曾让
+     * onMention 恒 void 0（树悬停 @ 消失）、sessionProbe.sid 恒 null（预览
+     * 面板 @ 点了空转、openLocalPath 预览键落匿名桶）——km 只喂这三处与
+     * sessionCwd（被动读取的可变对象，无打转风险），目录跟随仍走 k。 */
+    km = t.useSessions((n) => {
+      const b = n.byId;
+      for (const id of n.ids || []) {
+        const row = b[id];
+        if (row && ((row.retainedBy && row.retainedBy.mainView) || 0) > 0) return id;
+      }
+      return null;
+    }),
     h = t.useWorkspaces((n) => n.items),
     g = t.useWorkspaces((n) => n.recentWorkspaceId),
     y = t.useWorkspaces((n) => n.archivedSessionIds),
@@ -2726,13 +2739,13 @@ function Sidebar(t) {
     setCurrentRootPath(p); /* 评审修复：原裸赋值 currentRootPath=p 无 bus 节拍，订阅方感知不到 */
   }, [p]),
     React.useEffect(() => {
-      sessionProbe.set(k || null);
+      sessionProbe.set(km || null);
       /* chat 文件点击接管的 cwd 跟踪（15-deliv）：sid/cwd 同源同拍，消费方比对 sid；
        * m 入 deps——byId 行补齐（cwd 字段晚到）也重同步 */
-      const row = k ? m[k] : null;
-      sessionCwd.sid = k || null;
+      const row = km ? m[km] : null;
+      sessionCwd.sid = km || null;
       sessionCwd.cwd = (row && row.cwd) || null;
-    }, [k, m]));
+    }, [km, m]));
   const ce = (n, f) =>
     n
       ? host
@@ -3163,20 +3176,22 @@ function Sidebar(t) {
         layout: s,
         open: pe,
         onToggle: ke,
-        sessionId: k,
+        /* 预览桶路由键用 km（主视图会话）：t.sessionId 仅供 previewKeyFor 系列
+         * 读取（03-tree 全部用途），k 恒空会让树写入落匿名桶。 */
+        sessionId: km,
         onMention:
-          t.mentionBridge && k
+          t.mentionBridge && km
             ? (n) =>
                 t.mentionBridge.mention(
-                  k,
+                  km,
                   mentionRef(n.path, n.type === "directory"),
                 )
             : void 0,
         onMentionAbs:
-          t.mentionBridge && k
+          t.mentionBridge && km
             ? (n) =>
                 t.mentionBridge.mention(
-                  k,
+                  km,
                   mentionRef(n.path, n.type === "directory", { abs: true }),
                 )
             : void 0,
