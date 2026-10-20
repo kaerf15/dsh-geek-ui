@@ -49,16 +49,22 @@ function trashDir() {
   return join(homedir(), '.local', 'share', 'Trash', 'files')
 }
 
+/* 目标同名加时间戳后缀（moveEntrySync / 下载 / 上传共用——上传原先裸 copyFileSync
+ * 直接覆盖目标目录同名文件，与下载的 B5 修复不一致） */
+function uniqueDest(destDir, name) {
+  let dest = join(destDir, name)
+  if (!existsSync(dest)) return dest
+  const dot = name.lastIndexOf('.')
+  const stamped = dot > 0 ? name.slice(0, dot) + '-' + Date.now() + name.slice(dot) : name + '-' + Date.now()
+  return join(destDir, stamped)
+}
+
 /* 统一移动：把 src 迁入 destDir（调用方保证 destDir 已存在且为目录）。
  * 目标同名自动加时间戳后缀；rename 跨盘失败则 cpSync + rmSync 兜底。
  * /wb/delete、/wb/move、/wb/qnDelete、/wb/qnMoveToKb、/wb/qnMoveToProject 共用，消除重复。 */
 function moveEntrySync(src, destDir) {
   const name = baseName(src) || 'unnamed'
-  let dest = join(destDir, name)
-  if (existsSync(dest)) {
-    const dot = name.lastIndexOf('.')
-    dest = join(destDir, dot > 0 ? name.slice(0, dot) + '-' + Date.now() + name.slice(dot) : name + '-' + Date.now())
-  }
+  const dest = uniqueDest(destDir, name)
   try {
     renameSync(src, dest)
   } catch {
@@ -203,6 +209,13 @@ export function workbenchApi(ctx, cfg) {
     if (i === 0) return '/'
     if (i === 2 && /^[A-Za-z]:/.test(t)) return t.slice(0, 3)
     return t.slice(0, i)
+  }
+
+  /* 系统选择器退出码非零时的判定：用户取消（osascript -128 及本地化文案）vs 真错误。
+   * uploadPick / notesPick 共用。 */
+  const pickerOutcome = (r) => {
+    const o = errOf(r)
+    return /canceled|已取消|\(-128\)/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
   }
 
   async function run(command, timeoutMs) {
@@ -618,19 +631,22 @@ export function workbenchApi(ctx, cfg) {
       if (!shell) return { ok: false, error: 'shell unavailable' }
       const destDir = String((body && body.destDir) || '')
       if (!destDir) return { ok: false, error: 'no destDir' }
-      const r = await run(pickFilesCmd('选择要上传的文件'), 12e4)
-      if (r.exitCode !== 0) {
-        const o = errOf(r)
-        return /canceled|已取消|user canceled|\(-128\)/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
+      let r
+      try {
+        r = await run(pickFilesCmd('选择要上传的文件'), 12e4)
+      } catch (e) {
+        return { ok: false, error: msgOf(e) }
       }
+      if (r.exitCode !== 0) return pickerOutcome(r)
       const picked = stdoutOf(r).split('\n').map((x) => x.trim()).filter(Boolean)
       const done = []
       for (const src of picked) {
         const name = baseName(src)
         if (!name) continue
         try {
-          copyFileSync(src, join(destDir, name))
-          done.push(name)
+          const dest = uniqueDest(destDir, name)
+          copyFileSync(src, dest)
+          done.push(baseName(dest))
         } catch { /* 单个失败不拖垮整批 */ }
       }
       return { ok: true, files: done }
@@ -849,14 +865,8 @@ export function workbenchApi(ctx, cfg) {
         const name = baseName(src) || 'download'
         const destDir0 = String(body.destDir || '') || join(homedir(), 'Downloads')
         mkdirSync(destDir0, { recursive: true })
-        /* 同名冲突加时间戳后缀（对齐 /wb/delete 的废纸篓冲突处理）——
-         * 原先 copyFileSync 直接覆盖 Downloads 里的同名文件（评审修复 B5） */
-        let dest = join(destDir0, name)
-        if (existsSync(dest)) {
-          const dot = name.lastIndexOf('.')
-          const stamped = dot > 0 ? name.slice(0, dot) + '-' + Date.now() + name.slice(dot) : name + '-' + Date.now()
-          dest = join(destDir0, stamped)
-        }
+        /* 同名冲突加时间戳后缀（对齐 /wb/delete 的废纸篓冲突处理，uniqueDest 统一收口） */
+        const dest = uniqueDest(destDir0, name)
         copyFileSync(src, dest)
         return { ok: true, path: dest }
       } catch (e) {
@@ -887,10 +897,7 @@ export function workbenchApi(ctx, cfg) {
     'POST /wb/notesPick': async () => {
       if (!shell) return { ok: false, error: 'shell unavailable' }
       const r = await run(pickFolderCmd('选择笔记目录'), 12e4)
-      if (r.exitCode !== 0) {
-        const o = errOf(r)
-        return /canceled|已取消|user canceled|\(-128\)/i.test(o) ? { ok: false, canceled: true } : { ok: false, error: o || 'picker failed' }
-      }
+      if (r.exitCode !== 0) return pickerOutcome(r)
       const dir = stdoutOf(r).trim().replace(/[\\/]+$/, '')
       if (!dir) return { ok: false, error: 'empty selection' }
       const cur = await notesTouch(dir)
@@ -1204,17 +1211,15 @@ export function workbenchApi(ctx, cfg) {
         const dirSet = new Set()
         for (const line of out.split('\n')) {
           if (!line || line.length < 2) continue
-          let code = ''
-          let rel = ''
-          if (line.charAt(2) === ' ') {
-            code = line.slice(0, 2).trim()
-            rel = line.slice(3).trim()
-          } else if (line.charAt(1) === ' ') {
-            code = line.charAt(0)
-            rel = line.slice(2).trim()
-          } else {
-            code = line.slice(0, 2).trim()
-            rel = line.slice(3).trim()
+          /* porcelain 恒为 XY+空格+路径：统一 slice 解析（旧版三分支里 charAt(1)===' '
+           * 分支不可达——XY 占两位后 charAt(2) 必为空格）；rename 条目 R  old -> new
+           * 取新路径（旧版把整串当路径，产生幽灵条目） */
+          const code = line.slice(0, 2).trim()
+          let rel = line.slice(3).trim()
+          if (!rel) continue
+          if (code.includes('R')) {
+            const arrow = rel.indexOf(' -> ')
+            if (arrow >= 0) rel = rel.slice(arrow + 4)
           }
           if (rel.startsWith('"') && rel.endsWith('"')) {
             try { rel = JSON.parse(rel) } catch (e) {}
@@ -1286,8 +1291,9 @@ export function workbenchApi(ctx, cfg) {
       const p = String((body && body.path) || '')
       if (!p || !shell) return { diff: '' }
       try {
-        const dir = p.slice(0, p.lastIndexOf('/')) || p
-        const root = (await git(dir, ['rev-parse', '--show-toplevel'])).trim()
+        /* dirname(p)：原 p.slice(0, p.lastIndexOf('/')) 对无斜杠的 Windows 路径
+         * （C:\a\b.txt，lastIndexOf=-1）会把最后字符截掉当 cwd → gitDiff 静默全灭 */
+        const root = (await git(dirname(p), ['rev-parse', '--show-toplevel'])).trim()
         if (!root) return { diff: '' }
         let diff = ''
         try {
